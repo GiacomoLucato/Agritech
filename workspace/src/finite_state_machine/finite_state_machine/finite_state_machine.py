@@ -96,6 +96,8 @@ class FiniteStateMachine(Node):
         self.stopped = False
 
         # Variabili relative ai checkpoint (bivi)
+        self.current_checkpoint = None
+
         self.rotated_at_checkpoint = False
         self.frontal_image = None
         self.lateral_image = None
@@ -113,14 +115,29 @@ class FiniteStateMachine(Node):
         self.checkpoint3_reached = False
         self.checkpoint3_finished = False
 
+        self.checkpoint4_reached = False
+        self.checkpoint4_finished = False
+
+        self.checkpoint5_reached = False
+        self.checkpoint5_finished = False
+
+        self.checkpoint6_reached = False
+
         # Coordinate dei checkpoint
         self.checkpoint1_x = 0.525
         self.checkpoint1_y = -2.000
-        self.checkpoint2_x = 0.475
+        self.checkpoint2_x = 0.525
         self.checkpoint2_y = 0.525
-        self.checkpoint3_x = -2.000
-        self.checkpoint3_y = 0.500
-    
+        self.checkpoint3_x = 0.525
+        self.checkpoint3_y = 1.875
+        self.checkpoint4_x = -1.975
+        self.checkpoint4_y = 1.875
+        self.checkpoint5_x = -1.975
+        self.checkpoint5_y = 0.500
+
+        # Ultimo checkpoint -> posizione finale
+        self.checkpoint6_x = -1.975
+        self.checkpoint6_y = -2.000
 
         # -----------------------------
         # ROS I/O
@@ -206,52 +223,34 @@ class FiniteStateMachine(Node):
         # Salva l'immagine per CHECKPOINT_1
         if self.checkpoint1_reached and self.frontal_image is None and not self.checkpoint1_finished:
             self.frontal_image = img_bgr.copy()
-            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
-            self.pub_image.publish(out_msg)
             self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-
             return
 
         if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint1_finished:
             self.lateral_image = img_bgr.copy()
-            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
-            self.pub_image.publish(out_msg)
             self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-
             return
         
         # Salva l'immagine per CHECKPOINT_2
         if self.checkpoint2_reached and self.frontal_image is None and not self.checkpoint2_finished:
             self.frontal_image = img_bgr.copy()
-            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
-            self.pub_image.publish(out_msg)
             self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-
             return
 
         if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint2_finished:
             self.lateral_image = img_bgr.copy()
-            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
-            self.pub_image.publish(out_msg)
             self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-
             return
         
-        # Salva l'immagine per CHECKPOINT_3
-        if self.checkpoint3_reached and self.frontal_image is None and not self.checkpoint3_finished:
+        # Salva l'immagine per CHECKPOINT_5
+        if self.checkpoint5_reached and self.frontal_image is None and not self.checkpoint5_finished:
             self.frontal_image = img_bgr.copy()
-            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
-            self.pub_image.publish(out_msg)
             self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-
             return
 
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint3_finished:
+        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint5_finished:
             self.lateral_image = img_bgr.copy()
-            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
-            self.pub_image.publish(out_msg)
             self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-
             return
 
         # Estrae il canali BGR
@@ -405,6 +404,119 @@ class FiniteStateMachine(Node):
         self.obstacle_detected = self.current_distance < self.obstacle_threshold
 
 
+    def align_to_next_checkpoint(self):
+        goal_x = None
+        goal_y = None
+
+        # Determina la posizione del checkpoint a cui allinearsi (il successivo rispetto a quello raggiunto)
+        if self.current_checkpoint is None:
+            goal_x = self.checkpoint1_x
+            goal_y = self.checkpoint1_y
+        elif self.current_checkpoint == 1:
+            goal_x = self.checkpoint2_x
+            goal_y = self.checkpoint2_y       
+        elif self.current_checkpoint == 2:
+            goal_x = self.checkpoint3_x
+            goal_y = self.checkpoint3_y    
+        elif self.current_checkpoint == 3:
+            goal_x = self.checkpoint4_x
+            goal_y = self.checkpoint4_y
+        elif self.current_checkpoint == 4:
+            goal_x = self.checkpoint5_x
+            goal_y = self.checkpoint5_y
+        elif self.current_checkpoint == 5:
+            goal_x = self.checkpoint6_x
+            goal_y = self.checkpoint6_y
+
+        # Si allinea al prossimo checkpoint
+        target_yaw = self.calculate_target_yaw(goal_x, goal_y)
+        angle_err = self.angle_error(target_yaw)
+            
+        if abs(angle_err) > self.align_tol:
+            # Ruota con controllo proporzionale
+            angular_vel = max(min(0.8 * angle_err, self.turn_speed_max), -self.turn_speed_max)
+            self.publish_twist(0.0, angular_vel)
+        else:
+            self.aligning = False
+
+        return    
+
+    def check_for_checkpoint_reached(self):
+
+        # CHECKPOINT_1
+        if not self.checkpoint1_reached and not self.checkpoint1_finished:
+            d = self.distance_from_point(self.checkpoint1_x, self.checkpoint1_y)
+            #print(d)
+            if d <= 0.1:
+                self.state = "CHECKPOINT_1"
+                self.checkpoint1_reached = True
+
+                if self.checkpoint_initial_yaw is None:
+                    self.checkpoint_initial_yaw = self.yaw
+                    
+                self.publish_stop()
+                return 
+            
+        # CHECKPOINT_2
+        if not self.checkpoint2_reached and not self.checkpoint2_finished:
+            d = self.distance_from_point(self.checkpoint2_x, self.checkpoint2_y)
+            #print(d)
+            if d <= 0.1:
+                self.state = "CHECKPOINT_2"
+                self.checkpoint2_reached = True
+
+                if self.checkpoint_initial_yaw is None:
+                    self.checkpoint_initial_yaw = self.yaw
+
+                self.publish_stop()
+                return 
+            
+        # CHECKPOINT_3
+        if not self.checkpoint3_reached and not self.checkpoint3_finished:
+            d = self.distance_from_point(self.checkpoint3_x, self.checkpoint3_y)
+            #print(d)
+            if d <= 0.1:
+                self.checkpoint3_reached = True
+                self.checkpoint3_finished = True
+                self.current_checkpoint += 1
+                return      
+
+        # CHECKPOINT_4
+        if not self.checkpoint4_reached and not self.checkpoint4_finished:
+            d = self.distance_from_point(self.checkpoint4_x, self.checkpoint4_y)
+            #print(d)
+            if d <= 0.1:
+                self.checkpoint4_reached = True
+                self.checkpoint4_finished = True
+                self.current_checkpoint += 1
+                return       
+            
+        # CHECKPOINT_5
+        if not self.checkpoint5_reached and not self.checkpoint5_finished:
+            d = self.distance_from_point(self.checkpoint5_x, self.checkpoint5_y)
+            #print(d)
+            if d <= 0.1:
+                self.state = "CHECKPOINT_5"
+                print(self.state)
+                self.checkpoint5_reached = True
+
+                if self.checkpoint_initial_yaw is None:
+                    self.checkpoint_initial_yaw = self.yaw
+
+                self.publish_stop()
+                return 
+            
+        # CHECKPOINT_6
+        if not self.checkpoint6_reached:
+            d = self.distance_from_point(self.checkpoint6_x, self.checkpoint6_y)
+            #print(d)
+            if d <= 0.1:
+                self.stopped = True     # Ferma definitivamente il robot
+
+                self.publish_stop()
+                return 
+
+
     # -----------------------------
     # METODI DI STATO
     # -----------------------------
@@ -427,6 +539,11 @@ class FiniteStateMachine(Node):
         
         # Controllo di sicurezza: se lo stato interno non è FORWARD -> ritorna subito
         if self.state != "FORWARD": 
+            return
+        
+        # Ruota verso il prossimo checkpoint (bivio)
+        if self.aligning:
+            self.align_to_next_checkpoint()
             return
 
         # Salva odometria di partenza  
@@ -546,6 +663,8 @@ class FiniteStateMachine(Node):
                     self.ill_plant_detected_left = False
                     self.ill_plant_detected_right = False
 
+                    self.aligning = True
+
                     self.state = "ANALYZE"
 
                     return
@@ -555,6 +674,8 @@ class FiniteStateMachine(Node):
                 self.search_start_x = None
                 self.search_start_y = None
                 self.search_start_yaw = None
+
+                self.aligning = True
 
                 self.state = "FORWARD"
 
@@ -589,6 +710,8 @@ class FiniteStateMachine(Node):
         self.search_start_y = None
         self.search_start_yaw = None
 
+        self.aligning = True
+
         self.state = "FORWARD"
 
         return
@@ -609,7 +732,7 @@ class FiniteStateMachine(Node):
         base_path = os.path.join(home, "Agritech/workspace/Data/Original Data/")
 
         # 1. Selezione della cartella con probabilità pesata
-        subfolder = random.choice(
+        subfolder = random.choices(
             ["Leaf Blight", "Healthy"], 
             weights=[0.7, 0.3], 
             k=1
@@ -623,7 +746,7 @@ class FiniteStateMachine(Node):
             if not files:
                 raise FileNotFoundError(f"Nessun file immagine trovato in {folder_path}")
             
-            img_path = os.path.join(folder_path, random.choices(files))
+            img_path = os.path.join(folder_path, random.choice(files))
             img = cv2.imread(img_path)
             
             if img is None:
@@ -631,6 +754,10 @@ class FiniteStateMachine(Node):
 
         except Exception as e:
             self.get_logger().error(f"Errore caricamento immagine: {e}")
+
+            # Reset variabili di stato e ripresa navigazione
+            self.search_start_x = self.search_start_y = self.search_start_yaw = None
+            self.aligning = True
             self.state = "FORWARD"
             return
 
@@ -662,6 +789,7 @@ class FiniteStateMachine(Node):
 
         # Reset variabili di stato e ripresa navigazione
         self.search_start_x = self.search_start_y = self.search_start_yaw = None
+        self.aligning = True
         self.state = "FORWARD"
     
     def checkpoint(self, direction, check_num):
@@ -727,9 +855,9 @@ class FiniteStateMachine(Node):
         elif check_num == 2:
             self.checkpoint2_reached = False      
             self.checkpoint2_finished = True     
-        elif check_num == 3:
-            self.checkpoint3_reached = False
-            self.checkpoint3_finished = True
+        elif check_num == 5:
+            self.checkpoint5_reached = False
+            self.checkpoint5_finished = True
 
         # Resetta le variabili generiche di stato CHECKPOINT
         self.rotated_at_checkpoint = False
@@ -737,12 +865,20 @@ class FiniteStateMachine(Node):
         self.lateral_image = None
         self.count_frontal_image = None
         self.count_lateral_image = None   
-        self.checkpoint_initial_yaw = None       
+        self.checkpoint_initial_yaw = None      
+
+        # Incrementa il checkpoint corrente
+        if self.current_checkpoint is None:
+            self.current_checkpoint = 1
+        else:
+            self.current_checkpoint += 1 
 
         # Resetta le variabili relative allo stato FORWARD
         self.search_start_x = None
         self.search_start_y = None
         self.search_start_yaw = None
+
+        self.aligning = True
 
         self.state = "FORWARD"
         return
@@ -764,49 +900,8 @@ class FiniteStateMachine(Node):
             self.publish_stop()
             return
         
-        print(self.state)
-        
-        # 1. HIGH PRIORITY: CHECKPOINTS
-        if not self.checkpoint1_reached and not self.checkpoint1_finished:
-            d = self.distance_from_point(self.checkpoint1_x, self.checkpoint1_y)
-            #print(d)
-            if d <= 0.1:
-                self.state = "CHECKPOINT_1"
-                self.checkpoint1_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-                    
-                self.publish_stop()
-                return 
-            
-        # CHECKPOINT_2
-        if not self.checkpoint2_reached and not self.checkpoint2_finished:
-            d = self.distance_from_point(self.checkpoint2_x, self.checkpoint2_y)
-            #print(d)
-            if d <= 0.1:
-                self.state = "CHECKPOINT_2"
-                self.checkpoint2_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-
-                self.publish_stop()
-                return 
-            
-        # CHECKPOINT_3
-        if not self.checkpoint3_reached and not self.checkpoint3_finished:
-            d = self.distance_from_point(self.checkpoint3_x, self.checkpoint3_y)
-            #print(d)
-            if d <= 0.1:
-                self.state = "CHECKPOINT_3"
-                self.checkpoint3_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-
-                self.publish_stop()
-                return 
+        # Controlla se è a un bivio
+        self.check_for_checkpoint_reached()
 
         # Evitamento ostacoli
         self.detect_obstacle()
@@ -824,8 +919,8 @@ class FiniteStateMachine(Node):
             self.checkpoint(direction=-1, check_num=1)
         elif self.state == "CHECKPOINT_2":
             self.checkpoint(direction=1, check_num=2)
-        elif self.state == "CHECKPOINT_3":
-            self.checkpoint(direction=1, check_num=3)    
+        elif self.state == "CHECKPOINT_5":
+            self.checkpoint(direction=1, check_num=5)    
         elif self.state == "ANALYZE":
             self.analyze()        
 
