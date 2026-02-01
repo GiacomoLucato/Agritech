@@ -242,13 +242,13 @@ class FiniteStateMachine(Node):
             self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
             return
         
-        # Salva l'immagine per CHECKPOINT_3
-        if self.checkpoint3_reached and self.frontal_image is None and not self.checkpoint3_finished:
+        # Salva l'immagine per CHECKPOINT_5
+        if self.checkpoint5_reached and self.frontal_image is None and not self.checkpoint5_finished:
             self.frontal_image = img_bgr.copy()
             self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
             return
 
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint3_finished:
+        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint5_finished:
             self.lateral_image = img_bgr.copy()
             self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
             return
