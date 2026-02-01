@@ -1,2 +1,5 @@
 workspace/src/**/*.ttt filter=lfs diff=lfs merge=lfs -text
 scoperta_ide/scoperta_ide filter=lfs diff=lfs merge=lfs -text
+*.ttt filter=lfs diff=lfs merge=lfs -text
+*ttt filter=lfs diff=lfs merge=lfs -text
+*.ttm filter=lfs diff=lfs merge=lfs -text
