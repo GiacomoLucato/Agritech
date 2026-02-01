@@ -134,7 +134,7 @@ class FiniteStateMachine(Node):
         self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)     # Riceve le immagini della camera
         self.sub_scan = self.create_subscription(LaserScan, "/scan", self.on_scan, 10)          # Riceve il LIDAR
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)                             # Invia le velocità
-        self.pub_image = self.create_publisher(Image, "/my_robot/predictions", 10)              # Pubblica le immagini annotate con bounding box
+        self.pub_image = self.create_publisher(Image, "/yolo/annotated_image", 10)              # Pubblica le immagini annotate con bounding box
 
         self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)           # Ciclo di controllo principale
 
