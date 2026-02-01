@@ -15,6 +15,7 @@ from cv_bridge import CvBridge                                                  
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy         # type: ignore
 import cv2
 import joblib
+import random
 
 
 class FiniteStateMachine(Node):
@@ -608,7 +609,7 @@ class FiniteStateMachine(Node):
         base_path = os.path.join(home, "Agritech/workspace/Data/Original Data/")
 
         # 1. Selezione della cartella con probabilità pesata
-        subfolder = np.random.choices(
+        subfolder = random.choice(
             ["Leaf Blight", "Healthy"], 
             weights=[0.7, 0.3], 
             k=1
@@ -622,7 +623,7 @@ class FiniteStateMachine(Node):
             if not files:
                 raise FileNotFoundError(f"Nessun file immagine trovato in {folder_path}")
             
-            img_path = os.path.join(folder_path, np.random.choice(files))
+            img_path = os.path.join(folder_path, random.choices(files))
             img = cv2.imread(img_path)
             
             if img is None:
