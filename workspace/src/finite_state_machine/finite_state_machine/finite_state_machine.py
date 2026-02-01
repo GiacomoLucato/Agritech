@@ -690,31 +690,52 @@ class FiniteStateMachine(Node):
     # Evitamento ostacoli semplificato adattato al contesto
     def avoid(self):
 
-        if self.start_avoiding_yaw is None:
-            self.start_avoiding_yaw = self.yaw
+        if self.obstacle_detected:
+
+            # Stabilisce la direzione di evitamento
+            if self.avoiding_dir is None:
+
+                ranges = np.array(self.ranges)
+                n = len(ranges)
+                center = n // 2
+
+                # Define left and right sectors (you can tune widths)
+                right_sector = ranges[center - 60:center - 10]
+                left_sector  = ranges[center + 10:center + 60]
+
+                # Remove invalid values
+                right_sector = right_sector[np.isfinite(right_sector)]
+                left_sector  = left_sector[np.isfinite(left_sector)]
+
+                # Compute mean distances
+                right_mean = np.mean(right_sector) if len(right_sector) > 0 else 0.0
+                left_mean  = np.mean(left_sector) if len(left_sector) > 0 else 0.0
+
+                # Choose direction: go where there is MORE space
+                if left_mean > right_mean:
+                    self.avoiding_dir = 1      # turn left
+                    self.get_logger().info("Avoiding obstacle: turning LEFT")
+                else:
+                    self.avoiding_dir = -1     # turn right
+                    self.get_logger().info("Avoiding obstacle: turning RIGHT")
+
+            # Rotate in chosen direction
+            self.publish_twist(0.0, 0.4 * self.avoiding_dir)
             return
 
-        # Ruota di 90 gradi a sinistra per liberare il fronte
-        angle_error = self.angle_error(self.start_avoiding_yaw + (self.avoiding_dir * math.pi/2))
+        # Aggiorna lo stato interno
+        self.avoiding_dir = None
 
-        if abs(angle_error) >= 0.1:
-            self.publish_twist(0.0, self.avoiding_dir * 0.3)
-
-            return
-
-        # Se la strada è libera, procede
-        self.start_avoiding_yaw = None
-
-        # Resetta le variabili di stato FORWARD
+        # Reset FORWARD state variables
         self.search_start_x = None
         self.search_start_y = None
         self.search_start_yaw = None
 
-        self.aligning = True
-
+        # self.aligning = True
         self.state = "FORWARD"
 
         return
+
 
     def analyze(self):
         """
