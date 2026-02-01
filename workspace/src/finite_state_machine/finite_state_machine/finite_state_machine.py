@@ -15,7 +15,6 @@ from cv_bridge import CvBridge                                                  
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy         # type: ignore
 import cv2
 import joblib
-import numpy as np
 
 
 class FiniteStateMachine(Node):
@@ -146,22 +145,24 @@ class FiniteStateMachine(Node):
     # CARICAMENTO MODELLO SVM
     # -----------------------------
     def load_model(self):
+        """
+        Carica il modello SVM e le etichette delle classi dai file joblib.
 
-        '''
-        if YOLO is None:
-            raise RuntimeError("Ultralytics YOLO not installed")
+        Inizializza:
+            self.model: Il classificatore caricato.
+            self.class_names: Le etichette associate al modello.
+        """
+        
+
+
+        # Espande il simbolo '~' o recupera automaticamente /home/nome_utente
+        home = os.path.expanduser("~")
+        model_path = os.path.join(home, "Agritech/workspace/assets/leaf_svm_model.joblib")
+        labels_path = os.path.join(home, "Agritech/workspace/assets/leaf_labels.joblib")
 
         t0 = time.time()
-        self.model = YOLO(self.model_path)
-        self.model.fuse()
-        self.model_names = self.model.names
-        self.get_logger().info(f"Loaded YOLO model '{self.model_path}' in {time.time() - t0:.2f}s")
-        '''
-
-        # Load model
-        t0 = time.time()
-        self.model = joblib.load("/home/giacomo/Desktop/Agritech_lab/my_robot_ws/leaf_svm_model.joblib")
-        self.class_names = joblib.load("/home/giacomo/Desktop/Agritech_lab/my_robot_ws/leaf_labels.joblib")
+        self.model = joblib.load(model_path)
+        self.class_names = joblib.load(labels_path)
         self.get_logger().info(f"Loaded SVM model in {time.time() - t0:.2f}s")
 
     # -----------------------------
@@ -184,13 +185,14 @@ class FiniteStateMachine(Node):
     # -----------------------------
     def on_image(self, msg: Image):
         """
-        Callback per la ricezione delle immagini a colori.
+        Callback per l'elaborazione delle immagini.
 
-        Esegue l'inferenza YOLO, chiama `detect_target` per processare i risultati
-        e sovrappone i bounding box rilevati sull'immagine prima di ripubblicarla.
+        Converte il messaggio ROS in OpenCV, gestisce il salvataggio dei frame ai 
+        checkpoint e analizza la presenza di pixel "verde chiaro" per il 
+        rilevamento di piante potenzialmente malate.
 
         Args:
-            msg (Image): Messaggio immagine ROS 2.
+            msg (Image): Messaggio immagine ricevuto dal sensore.
         """
 
         # Converte da ROS a OpenCV
@@ -251,8 +253,6 @@ class FiniteStateMachine(Node):
 
             return
 
-
-
         # Estrae il canali BGR
         blue_channel = img_bgr[:, :, 0]
         green_channel = img_bgr[:, :, 1]
@@ -292,6 +292,11 @@ class FiniteStateMachine(Node):
     # CALLBACK PER LIDAR
     # -----------------------------
     def on_scan(self, msg: LaserScan):
+        """
+        Callback per i dati LiDAR. Aggiorna la distanza minima frontale 
+        considerando un settore centrale di 40 campioni.
+        """
+
         self.ranges = np.array(msg.ranges)
 
         n = len(self.ranges)
@@ -307,6 +312,13 @@ class FiniteStateMachine(Node):
     # METODI DI CONTROLLO
     # -----------------------------
     def count_ill_pixels(self, img_bgr):
+        """
+        Conta i pixel che rientrano nel range cromatico del "verde malato" 
+        tramite filtraggio dei canali BGR.
+
+        Returns:
+            int: Numero di pixel rilevati.
+        """
         
         # Estrae i canali RBG
         red_channel = img_bgr[:, :, 2]
@@ -385,8 +397,7 @@ class FiniteStateMachine(Node):
         Verifica la presenza di ostacoli.
 
         Prioritizza l'evitamento: un ostacolo è rilevato se la distanza LiDAR
-        frontale è inferiore alla soglia, A MENO CHE l'oggetto rilevato da YOLO
-        sia proprio in quel punto.
+        frontale è inferiore alla soglia.
         """
  
         # Rileva un ostacolo generico se la distanza LiDAR frontale è troppo piccola.
@@ -465,7 +476,9 @@ class FiniteStateMachine(Node):
            della scansione.
         
         Al termine del riallineamento, lo stato viene impostato su "FORWARD" per 
-           proseguire l'esplorazione in linea retta.
+           proseguire l'esplorazione in linea retta se nessuna pianta potenzialmente malata
+           è stata identificata; altrimenti, lo stato viene impostato su "ANALYZE" per
+           analizzare un campione raccolto della pianta in questione.
         """
         # Controllo di sicurezza: se lo stato interno non è SCAN -> ritorna immediatamente
         if self.state != "SCAN":
@@ -580,23 +593,52 @@ class FiniteStateMachine(Node):
         return
 
     def analyze(self):
+        """
+        Esegue l'analisi della pianta tramite classificazione SVM.
+
+        Seleziona casualmente un'immagine dalla directory dati (70% Blight, 30% Healthy),
+        estrae le feature HOG e utilizza il modello SVM per l'inferenza.
+        Pubblica il risultato visuale e ripristina lo stato FORWARD.
+        """
         self.publish_stop()
 
-        # Caricamento immagine
+        # Configurazione percorsi e parametri
         IMG_SIZE = (128, 128)
-        img_path = "/home/giacomo/Desktop/Agritech_lab/my_robot_ws/Data/Original Data/Leaf Blight/img1.JPG"
-        img = cv2.imread(img_path)
+        home = os.path.expanduser("~")
+        base_path = os.path.join(home, "Agritech/workspace/Data/Original Data/")
+
+        # 1. Selezione della cartella con probabilità pesata
+        subfolder = np.random.choices(
+            ["Leaf Blight", "Healthy"], 
+            weights=[0.7, 0.3], 
+            k=1
+        )[0]
         
-        if img is None:
-            self.get_logger().error(f"Could not read image at {img_path}")
+        folder_path = os.path.join(base_path, subfolder)
+
+        # 2. Selezione di un'immagine randomica nella cartella scelta
+        try:
+            files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            if not files:
+                raise FileNotFoundError(f"Nessun file immagine trovato in {folder_path}")
+            
+            img_path = os.path.join(folder_path, np.random.choice(files))
+            img = cv2.imread(img_path)
+            
+            if img is None:
+                raise ValueError(f"Impossibile leggere l'immagine: {img_path}")
+
+        except Exception as e:
+            self.get_logger().error(f"Errore caricamento immagine: {e}")
             self.state = "FORWARD"
             return
 
+        # Elaborazione immagine
         display_img = img.copy() 
         img_resized = cv2.resize(img, IMG_SIZE)
         gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
 
-        # Inference
+        # Inference HOG + SVM
         hog = cv2.HOGDescriptor((128,128), (32,32), (16,16), (16,16), 9)
         features = hog.compute(gray).flatten().reshape(1, -1)
         
@@ -604,35 +646,35 @@ class FiniteStateMachine(Node):
         prob = self.model.predict_proba(features).max()
         label = self.class_names[pred_idx]
 
-        # Compone il testo da sovrascrivere all'immagine (label predetta e confidence score)
+        # Overlay grafico dei risultati
         text = f"{label} ({prob*100:.1f}%)"
-        
-        # Impostazioni del testo
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        org = (20, 50) 
-        font_scale = 1.0
-        color = (0, 255, 0) 
-        thickness = 2
+        cv2.putText(display_img, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 
+                    1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
-        # Sovrascrive il testo all'immagine
-        cv2.putText(display_img, text, org, font, font_scale, color, thickness, cv2.LINE_AA)
-
-        # Pubblica l'immagine sul canale d'uscita
+        # Pubblicazione immagine annotata
         try:
             annotated_msg = self.bridge.cv2_to_imgmsg(display_img, encoding="bgr8")
             self.pub_image.publish(annotated_msg)
-            self.get_logger().info(f"Published prediction: {text}")
+            self.get_logger().info(f"Analisi completata [{subfolder}]: {text}")
         except Exception as e:
-            self.get_logger().error(f"Failed to publish annotated image: {e}")
+            self.get_logger().error(f"Errore pubblicazione immagine: {e}")
 
-        # Resetta le variabili di stato FORWARD
-        self.search_start_x = None
-        self.search_start_y = None
-        self.search_start_yaw = None
-
+        # Reset variabili di stato e ripresa navigazione
+        self.search_start_x = self.search_start_y = self.search_start_yaw = None
         self.state = "FORWARD"
     
     def checkpoint(self, direction, check_num):
+        """
+        Gestisce la logica di ispezione ai checkpoint tramite rotazione e confronto visivo.
+
+        Esegue una rotazione di 90° per acquisire un'immagine laterale, confronta il 
+        numero di pixel "malati" tra la vista frontale e quella laterale per decidere 
+        l'orientamento ottimale, quindi resetta lo stato per riprendere la navigazione.
+
+        Args:
+            direction (int): Direzione di rotazione (1 per sinistra, -1 per destra).
+            check_num (int): Identificativo numerico del checkpoint corrente.
+        """
 
         # Attende che l'immagine frontale sia memorizzata
         if self.frontal_image is None:
@@ -709,6 +751,14 @@ class FiniteStateMachine(Node):
     # CONTROL LOOP
     # -----------------------------
     def control_loop(self):
+        """
+        Ciclo di controllo principale del robot (FSM).
+
+        Gestisce le transizioni di stato basandosi sulla posizione (checkpoint), 
+        sulla sicurezza (evitamento ostacoli) e sulla logica di missione. Coordina 
+        l'esecuzione dei comportamenti di navigazione, scansione e analisi.
+        """
+
         if self.x is None or self.yaw is None or self.ranges is None:
             self.publish_stop()
             return
