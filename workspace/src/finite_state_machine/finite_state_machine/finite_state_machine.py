@@ -1,0 +1,798 @@
+#!/usr/bin/env python3
+import os
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+
+import time
+import math
+import cv2                                                                       # type: ignore
+import numpy as np                                                               # type: ignore
+import rclpy                                                                     # type: ignore
+from rclpy.node import Node                                                      # type: ignore
+from sensor_msgs.msg import Image, LaserScan                                     # type: ignore
+from nav_msgs.msg import Odometry                                                # type: ignore
+from geometry_msgs.msg import Twist                                              # type: ignore
+from cv_bridge import CvBridge                                                   # type: ignore
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy         # type: ignore
+import cv2
+import joblib
+import numpy as np
+
+
+class FiniteStateMachine(Node):
+    def __init__(self):
+        super().__init__("limo_yolo")
+
+        # PARAMETRI ROS
+        self.declare_parameter("image_topic", "/image")
+        self.declare_parameter("turn_speed_max", 1.5)           # Velocità angolare massima
+
+        self.img_topic = self.get_parameter("image_topic").value
+        self.turn_speed_max = self.get_parameter("turn_speed_max").value
+
+        # CAMERA E IMMAGINE
+        self.image_w = None         # Ampiezza immagine (width)
+
+        self.bridge = CvBridge()
+
+        # MODELLO
+        self.model = None
+
+        # CONTROLLO MOVIMENTO
+        self.rate_hz = 20
+        self.forward_speed = 0.4        # Velocità lineare
+        self.align_tol = 0.05           # Errore tollerato in fase di riallineamento
+
+        # VARIABILE DI STATO
+        self.state = "FORWARD"  # Indica lo stato interno della FSM
+
+        # ODOMETRIA
+        # Odometria corrente
+        self.x = None
+        self.y = None
+        self.yaw = None
+
+        # Odometria di partenza
+        self.starting_x = None
+        self.starting_y = None
+        self.starting_yaw = None
+
+        # SEARCH E SCAN
+        self.search_straight_distance = 1 # Distanza in rettilineo da percorrere in fase "FORWARD"
+
+        # Odometria di partenza per la fase di ricerca
+        self.search_start_x = None
+        self.search_start_y = None
+        self.search_start_yaw = None
+
+        # Variabili di stato per la fase di "SCAN"
+        self.turning_right = True
+        self.turning_left = False
+        self.realigning = False
+
+        self.right_target_yaw = None
+        self.left_target_yaw = None
+        self.realigning_target_yaw = None
+
+        # Variabile di stato che indica se una pianta malata è stata identificata
+        self.ill_plant_detected = False
+        self.ill_plant_detected_left = False
+        self.ill_plant_detected_right = False
+
+        # RILEVAMENTO OSTACOLI
+        self.ranges = []
+
+        self.obstacle_detected = False
+        self.avoiding_dir = 1   # Sinistra di default
+        self.avoiding = False
+        self.aligning = False
+
+        self.obstacle_threshold = 0.4   # Distanza di sicurezza a cui evitare un ostacolo
+        self.current_distance = np.inf  # Distanza corrente da eventuali ostacoli
+
+        # Odometria di partenza in fase di evitamento ostacolo
+        self.start_avoiding_yaw = None
+
+        # Logica di stop
+        self.stopped = False
+
+        # Variabili relative ai checkpoint (bivi)
+        self.rotated_at_checkpoint = False
+        self.frontal_image = None
+        self.lateral_image = None
+        self.count_frontal_image = None
+        self.count_lateral_image = None
+
+        self.checkpoint_initial_yaw = None
+
+        self.checkpoint1_reached = False
+        self.checkpoint1_finished = False
+
+        self.checkpoint2_reached = False
+        self.checkpoint2_finished = False
+
+        self.checkpoint3_reached = False
+        self.checkpoint3_finished = False
+
+        # Coordinate dei checkpoint
+        self.checkpoint1_x = 0.525
+        self.checkpoint1_y = -2.000
+        self.checkpoint2_x = 0.475
+        self.checkpoint2_y = 0.525
+        self.checkpoint3_x = -2.000
+        self.checkpoint3_y = 0.500
+    
+
+        # -----------------------------
+        # ROS I/O
+        # -----------------------------
+        qos = QoSProfile(
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        self.odom_sub = self.create_subscription(Odometry, "/odom", self.odom_callback, qos)    # Riceve odometria
+        self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)     # Riceve le immagini della camera
+        self.sub_scan = self.create_subscription(LaserScan, "/scan", self.on_scan, 10)          # Riceve il LIDAR
+        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)                             # Invia le velocità
+        self.pub_image = self.create_publisher(Image, "/my_robot/predictions", 10)              # Pubblica le immagini annotate con bounding box
+
+        self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)           # Ciclo di controllo principale
+
+        self.load_model()
+        self.get_logger().info(f"Node loaded...")
+
+    # -----------------------------
+    # CARICAMENTO MODELLO SVM
+    # -----------------------------
+    def load_model(self):
+
+        '''
+        if YOLO is None:
+            raise RuntimeError("Ultralytics YOLO not installed")
+
+        t0 = time.time()
+        self.model = YOLO(self.model_path)
+        self.model.fuse()
+        self.model_names = self.model.names
+        self.get_logger().info(f"Loaded YOLO model '{self.model_path}' in {time.time() - t0:.2f}s")
+        '''
+
+        # Load model
+        t0 = time.time()
+        self.model = joblib.load("/home/giacomo/Desktop/Agritech_lab/my_robot_ws/leaf_svm_model.joblib")
+        self.class_names = joblib.load("/home/giacomo/Desktop/Agritech_lab/my_robot_ws/leaf_labels.joblib")
+        self.get_logger().info(f"Loaded SVM model in {time.time() - t0:.2f}s")
+
+    # -----------------------------
+    # CALLBACK PER ODOMETRIA
+    # -----------------------------
+    def odom_callback(self, msg: Odometry):
+        self.x = msg.pose.pose.position.x
+        self.y = msg.pose.pose.position.y
+        q = msg.pose.pose.orientation
+        self.yaw = self.quaternion_to_yaw(q.x, q.y, q.z, q.w)
+
+        if self.starting_x is None:
+            self.starting_x = self.x
+            self.starting_y = self.y
+            self.starting_yaw = self.yaw
+            self.get_logger().info("Odom initialized")
+
+    # -----------------------------
+    # CALLBACK PER CAMERA
+    # -----------------------------
+    def on_image(self, msg: Image):
+        """
+        Callback per la ricezione delle immagini a colori.
+
+        Esegue l'inferenza YOLO, chiama `detect_target` per processare i risultati
+        e sovrappone i bounding box rilevati sull'immagine prima di ripubblicarla.
+
+        Args:
+            msg (Image): Messaggio immagine ROS 2.
+        """
+
+        # Converte da ROS a OpenCV
+        try:
+            img_bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception as e:
+            self.get_logger().warn(f"cv_bridge failed: {e}")
+            return
+        
+        # Salva l'immagine per CHECKPOINT_1
+        if self.checkpoint1_reached and self.frontal_image is None and not self.checkpoint1_finished:
+            self.frontal_image = img_bgr.copy()
+            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
+            self.pub_image.publish(out_msg)
+            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
+
+            return
+
+        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint1_finished:
+            self.lateral_image = img_bgr.copy()
+            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
+            self.pub_image.publish(out_msg)
+            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
+
+            return
+        
+        # Salva l'immagine per CHECKPOINT_2
+        if self.checkpoint2_reached and self.frontal_image is None and not self.checkpoint2_finished:
+            self.frontal_image = img_bgr.copy()
+            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
+            self.pub_image.publish(out_msg)
+            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
+
+            return
+
+        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint2_finished:
+            self.lateral_image = img_bgr.copy()
+            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
+            self.pub_image.publish(out_msg)
+            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
+
+            return
+        
+        # Salva l'immagine per CHECKPOINT_3
+        if self.checkpoint3_reached and self.frontal_image is None and not self.checkpoint3_finished:
+            self.frontal_image = img_bgr.copy()
+            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
+            self.pub_image.publish(out_msg)
+            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
+
+            return
+
+        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint3_finished:
+            self.lateral_image = img_bgr.copy()
+            out_msg = self.bridge.cv2_to_imgmsg(self.frontal_image, encoding="bgr8")
+            self.pub_image.publish(out_msg)
+            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
+
+            return
+
+
+
+        # Estrae il canali BGR
+        blue_channel = img_bgr[:, :, 0]
+        green_channel = img_bgr[:, :, 1]
+        red_channel = img_bgr[:, :, 2]
+
+        # Applica la condizione per trovare verde chiaro (piante potenzialmente malate)
+        condition = (green_channel > 80) & (green_channel < 190) & \
+                    (red_channel < 110) & (red_channel > 50) & \
+                    (blue_channel < 70)
+
+        light_green_count = np.count_nonzero(condition)
+
+        # Calcola la percentuale
+        total_pixels = img_bgr.shape[0] * img_bgr.shape[1]
+        percentage = (light_green_count / total_pixels) * 100
+
+        if percentage > 3.0:
+            self.get_logger().warn(f"WARNING: Light green detection high! Ratio: {percentage:.2f}%")
+
+            if self.state == "SCAN":
+
+                if self.turning_right:
+                    self.ill_plant_detected_right = True
+                
+                if self.turning_left:
+                    self.ill_plant_detected_left = True
+
+        h, w = img_bgr.shape[:2]
+
+        if self.image_w is None:
+            self.image_w = w
+
+        return
+
+
+    # -----------------------------
+    # CALLBACK PER LIDAR
+    # -----------------------------
+    def on_scan(self, msg: LaserScan):
+        self.ranges = np.array(msg.ranges)
+
+        n = len(self.ranges)
+        center = n // 2
+        left = max(center - 20, 0)
+        right = min(center + 20, n)
+        if left < right:
+            self.current_distance = np.nanmin(self.ranges[left:right])
+        else:
+            self.current_distance = np.nanmin(self.ranges)
+
+    # -----------------------------
+    # METODI DI CONTROLLO
+    # -----------------------------
+    def count_ill_pixels(self, img_bgr):
+        
+        # Estrae i canali RBG
+        red_channel = img_bgr[:, :, 2]
+        blue_channel = img_bgr[:, :, 0]
+        green_channel = img_bgr[:, :, 1]
+
+        # Condizione per identificare il verde malato
+        condition = (green_channel > 80) & (green_channel < 190) & \
+                    (red_channel < 110) & (red_channel > 50) & \
+                    (blue_channel < 70)
+
+        # Conta quanti pixel nell'immagine sono verde malato
+        light_green_count = np.count_nonzero(condition)
+
+        return light_green_count
+
+    def distance_from_point(self, x0: float, y0: float) -> float:
+        """
+        Calcola la distanza euclidea dalla posizione corrente (self.x, self.y)
+        a un punto dato (x0, y0).
+        """
+        return math.hypot(self.x - x0, self.y - y0)
+    
+    def quaternion_to_yaw(self, qx: float, qy: float, qz: float, qw: float) -> float:
+        """
+        Calcola l'imbardata (yaw) da un quaternione.
+        """
+        siny = 2.0 * (qw * qz + qx * qy)
+        cosy = 1.0 - 2.0 * (qy*qy + qz*qz)
+        return math.atan2(siny, cosy)
+
+    def normalize_angle(self, angle: float) -> float:
+        """
+        Normalizza un angolo all'intervallo [-pi, pi).
+        """
+        return (angle + math.pi) % (2 * math.pi) - math.pi
+
+    def angle_error(self, target_angle: float) -> float:
+        """
+        Calcola l'errore angolare normalizzato tra l'angolo target e lo yaw corrente.
+        """
+        return self.normalize_angle(target_angle - self.yaw)
+
+    def calculate_target_yaw(self, goal_x: float, goal_y: float) -> float:
+        """
+        Calcola l'angolo di imbardata (yaw) necessario per puntare verso il goal.
+        """
+        return math.atan2(goal_y - self.y, goal_x - self.x)
+    
+    def publish_twist(self, linear=0.0, angular=0.0):
+        """
+        Pubblica un comando di velocità lineare e angolare sul topic /cmd_vel.
+
+        Args:
+            linear (float): Velocità lineare in X (m/s).
+            angular (float): Velocità angolare in Z (rad/s).
+        """
+        msg = Twist()
+        msg.linear.x = float(linear)
+        msg.angular.z = float(angular)
+        self.cmd_pub.publish(msg)
+
+    def publish_stop(self):
+        """Pubblica un comando di velocità nullo (arresto del robot)."""
+        self.publish_twist(0.0, 0.0)
+
+    def print_message(self, message):
+        self.get_logger().info(message)
+        
+
+    # -----------------------------
+    # RILEVAMENTO OSTACOLI
+    # -----------------------------
+    def detect_obstacle(self):
+        """
+        Verifica la presenza di ostacoli.
+
+        Prioritizza l'evitamento: un ostacolo è rilevato se la distanza LiDAR
+        frontale è inferiore alla soglia, A MENO CHE l'oggetto rilevato da YOLO
+        sia proprio in quel punto.
+        """
+ 
+        # Rileva un ostacolo generico se la distanza LiDAR frontale è troppo piccola.
+        self.obstacle_detected = self.current_distance < self.obstacle_threshold
+
+
+    # -----------------------------
+    # METODI DI STATO
+    # -----------------------------
+    def move_forward(self):
+
+        """
+        Gestisce la fase di avanzamento rettilineo durante la modalità di ricerca.
+        
+        Il metodo esegue le seguenti operazioni:
+        1. Verifica che lo stato corrente sia effettivamente "FORWARD".
+        2. Memorizza la posizione iniziale (odometria) al primo avvio della manovra.
+        3. Calcola la distanza percorsa rispetto al punto di partenza.
+        4. Se la distanza percorsa è uguale o superiore a 'search_straight_distance':
+           - Arresta il robot.
+           - Resetta tutti i parametri di navigazione e orientamento.
+           - Passa allo stato "SCAN" per iniziare la rotazione di ricerca.
+        5. Se la distanza non è stata ancora raggiunta, continua a pubblicare
+           un comando di velocità lineare costante.
+        """
+        
+        # Controllo di sicurezza: se lo stato interno non è FORWARD -> ritorna subito
+        if self.state != "FORWARD": 
+            return
+
+        # Salva odometria di partenza  
+        if self.search_start_x is None:
+            self.search_start_y = self.y
+            self.search_start_yaw = self.yaw
+            self.search_start_x = self.x
+
+        # Avanza per la distanza indicata, poi passa allo stato "SCAN"
+        d = self.distance_from_point(self.search_start_x, self.search_start_y)
+
+        if d >= self.search_straight_distance:
+            self.publish_stop()
+
+            # Resetta i parametri di scansione 
+            self.turning_right = True
+            self.turning_left = False
+            self.realigning = False
+
+            self.right_target_yaw = None
+            self.left_target_yaw = None
+            self.realigning_target_yaw = None
+
+            # Resetta i parametri di stato
+            self.search_start_x = None
+            self.search_start_y = None
+            self.search_start_yaw = None
+
+            self.state = "SCAN"
+
+            return
+
+        # Altrimenti, prosegue dritto
+        self.publish_twist(self.forward_speed, 0.0)
+
+        return
+
+    def scan(self):
+        """
+        Esegue una manovra di scansione angolare sul posto per cercare il target.
+        
+        La logica segue una sequenza di tre fasi:
+        1. ROTAZIONE A DESTRA: Ruota il robot di 45 gradi verso destra rispetto 
+           all'orientamento iniziale.
+        2. ROTAZIONE A SINISTRA: Una volta completata la destra, ruota fino a 
+           45 gradi a sinistra rispetto all'orientamento di partenza (arco totale di 90°).
+        3. RIALLINEAMENTO: Torna all'orientamento originale memorizzato all'inizio 
+           della scansione.
+        
+        Al termine del riallineamento, lo stato viene impostato su "FORWARD" per 
+           proseguire l'esplorazione in linea retta.
+        """
+        # Controllo di sicurezza: se lo stato interno non è SCAN -> ritorna immediatamente
+        if self.state != "SCAN":
+            return
+
+        # Gira a destra
+        if self.turning_right:
+
+            if self.right_target_yaw is None:
+                self.start_spinning_yaw = self.yaw  # Salva l'orientamento corrente per il successivo riallineamento
+                self.right_target_yaw = self.yaw - math.pi / 4
+
+            # Se ha raggiunto l'ampiezza desiderata, smette di ruotare
+            if abs(self.angle_error(self.right_target_yaw)) < self.align_tol:
+                self.publish_stop()
+
+                # Aggiorna le variabili interne
+                self.right_target_yaw = None
+                self.turning_left = True
+                self.turning_right = False
+
+                return
+            
+            # Altrimenti, ruota verso DESTRA
+            self.publish_twist(0.0, -0.5)
+
+            return
+        
+        # Gira a sinistra
+        if self.turning_left:
+
+            if self.left_target_yaw is None:
+                self.left_target_yaw = self.start_spinning_yaw + math.pi / 4
+
+            # Se ha raggiunto l'ampiezza desiderata, smette di ruotare
+            if abs(self.angle_error(self.left_target_yaw)) < 0.05:
+                self.publish_stop()
+                self.left_target_yaw = None
+                self.realigning = True
+                self.turning_left = False
+
+                return
+            
+            # Altrimenti, ruota verso SINISTRA
+            self.publish_twist(0.0, 0.5)
+            return
+        
+        # Riallineamento a orientamento di partenza
+        if self.realigning:
+            
+            # Salva orientamento di partenza per la fase di riallineamento
+            if self.realigning_target_yaw is None:
+                self.realigning_target_yaw = self.start_spinning_yaw
+
+            # Se ha completato il riallineamento: smette di ruotare e torna allo stato FORWARD
+            if abs(self.angle_error(self.realigning_target_yaw)) < self.align_tol:
+                self.publish_stop()
+                self.realigning_target_yaw = None
+                self.realigning = False
+
+                # A questo punto il robot è orientato correttamente
+                # Se sono state rilevate piante malate durante la scansione, analizza un campione delle foglie
+                if self.ill_plant_detected_left or self.ill_plant_detected_right:
+                    self.ill_plant_detected_left = False
+                    self.ill_plant_detected_right = False
+
+                    self.state = "ANALYZE"
+
+                    return
+
+                # Altrimenti procede dritto
+                # Resetta le variabili relative allo stato FORWARD
+                self.search_start_x = None
+                self.search_start_y = None
+                self.search_start_yaw = None
+
+                self.state = "FORWARD"
+
+                return
+            
+            # Altrimenti, gira a destra
+            self.publish_twist(0.0, -0.5)
+            return
+
+        return
+
+    # Evitamento ostacoli semplificato adattato al contesto
+    def avoid(self):
+
+        if self.start_avoiding_yaw is None:
+            self.start_avoiding_yaw = self.yaw
+            return
+
+        # Ruota di 90 gradi a sinistra per liberare il fronte
+        angle_error = self.angle_error(self.start_avoiding_yaw + (self.avoiding_dir * math.pi/2))
+
+        if abs(angle_error) >= 0.1:
+            self.publish_twist(0.0, self.avoiding_dir * 0.3)
+
+            return
+
+        # Se la strada è libera, procede
+        self.start_avoiding_yaw = None
+
+        # Resetta le variabili di stato FORWARD
+        self.search_start_x = None
+        self.search_start_y = None
+        self.search_start_yaw = None
+
+        self.state = "FORWARD"
+
+        return
+
+    def analyze(self):
+        self.publish_stop()
+
+        # Caricamento immagine
+        IMG_SIZE = (128, 128)
+        img_path = "/home/giacomo/Desktop/Agritech_lab/my_robot_ws/Data/Original Data/Leaf Blight/img1.JPG"
+        img = cv2.imread(img_path)
+        
+        if img is None:
+            self.get_logger().error(f"Could not read image at {img_path}")
+            self.state = "FORWARD"
+            return
+
+        display_img = img.copy() 
+        img_resized = cv2.resize(img, IMG_SIZE)
+        gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
+
+        # Inference
+        hog = cv2.HOGDescriptor((128,128), (32,32), (16,16), (16,16), 9)
+        features = hog.compute(gray).flatten().reshape(1, -1)
+        
+        pred_idx = self.model.predict(features)[0]
+        prob = self.model.predict_proba(features).max()
+        label = self.class_names[pred_idx]
+
+        # Compone il testo da sovrascrivere all'immagine (label predetta e confidence score)
+        text = f"{label} ({prob*100:.1f}%)"
+        
+        # Impostazioni del testo
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        org = (20, 50) 
+        font_scale = 1.0
+        color = (0, 255, 0) 
+        thickness = 2
+
+        # Sovrascrive il testo all'immagine
+        cv2.putText(display_img, text, org, font, font_scale, color, thickness, cv2.LINE_AA)
+
+        # Pubblica l'immagine sul canale d'uscita
+        try:
+            annotated_msg = self.bridge.cv2_to_imgmsg(display_img, encoding="bgr8")
+            self.pub_image.publish(annotated_msg)
+            self.get_logger().info(f"Published prediction: {text}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to publish annotated image: {e}")
+
+        # Resetta le variabili di stato FORWARD
+        self.search_start_x = None
+        self.search_start_y = None
+        self.search_start_yaw = None
+
+        self.state = "FORWARD"
+    
+    def checkpoint(self, direction, check_num):
+
+        # Attende che l'immagine frontale sia memorizzata
+        if self.frontal_image is None:
+            return
+        
+        # Ruota di 90 gradi nella direzione specificata 
+        angle_error = self.angle_error(self.checkpoint_initial_yaw + (direction*math.pi/2))
+
+        if abs(angle_error) >= 0.1 and not self.rotated_at_checkpoint:
+            self.publish_twist(0.0, 0.3*direction)
+            print(f"Rotating: {self.rotated_at_checkpoint}")
+            return
+        
+        if not self.rotated_at_checkpoint:
+            self.rotated_at_checkpoint = True
+            self.publish_stop()     # Smette di ruotare
+
+        if self.lateral_image is None:
+            return
+        
+
+        # Confronta le due immagini e decide la direzione da prendere
+        if self.count_frontal_image is None:
+            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
+            return
+        
+        if self.count_lateral_image is None:
+            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
+            return
+
+        print(f"FRONTAL IMAGE COUNT: {self.count_frontal_image}")
+        print(f"LATERAL IMAGE COUNT: {self.count_lateral_image}")
+
+        if self.count_frontal_image < self.count_lateral_image:
+            self.publish_stop()     # Assicura che il robot non ruoti
+
+        else:
+
+            # Si riallinea alla direzione iniziale
+            angle_error = self.angle_error(self.checkpoint_initial_yaw)
+
+            if abs(angle_error) >= 0.1:
+                self.publish_twist(0.0, -0.3*direction)
+                return
+
+        if check_num == 1:
+            self.checkpoint1_reached = False      
+            self.checkpoint1_finished = True
+        elif check_num == 2:
+            self.checkpoint2_reached = False      
+            self.checkpoint2_finished = True     
+        elif check_num == 3:
+            self.checkpoint3_reached = False
+            self.checkpoint3_finished = True
+
+        # Resetta le variabili generiche di stato CHECKPOINT
+        self.rotated_at_checkpoint = False
+        self.frontal_image = None
+        self.lateral_image = None
+        self.count_frontal_image = None
+        self.count_lateral_image = None   
+        self.checkpoint_initial_yaw = None       
+
+        # Resetta le variabili relative allo stato FORWARD
+        self.search_start_x = None
+        self.search_start_y = None
+        self.search_start_yaw = None
+
+        self.state = "FORWARD"
+        return
+
+
+    # -----------------------------
+    # CONTROL LOOP
+    # -----------------------------
+    def control_loop(self):
+        if self.x is None or self.yaw is None or self.ranges is None:
+            self.publish_stop()
+            return
+        
+        print(self.state)
+        
+        # 1. HIGH PRIORITY: CHECKPOINTS
+        if not self.checkpoint1_reached and not self.checkpoint1_finished:
+            d = self.distance_from_point(self.checkpoint1_x, self.checkpoint1_y)
+            #print(d)
+            if d <= 0.1:
+                self.state = "CHECKPOINT_1"
+                self.checkpoint1_reached = True
+
+                if self.checkpoint_initial_yaw is None:
+                    self.checkpoint_initial_yaw = self.yaw
+                    
+                self.publish_stop()
+                return 
+            
+        # CHECKPOINT_2
+        if not self.checkpoint2_reached and not self.checkpoint2_finished:
+            d = self.distance_from_point(self.checkpoint2_x, self.checkpoint2_y)
+            #print(d)
+            if d <= 0.1:
+                self.state = "CHECKPOINT_2"
+                self.checkpoint2_reached = True
+
+                if self.checkpoint_initial_yaw is None:
+                    self.checkpoint_initial_yaw = self.yaw
+
+                self.publish_stop()
+                return 
+            
+        # CHECKPOINT_3
+        if not self.checkpoint3_reached and not self.checkpoint3_finished:
+            d = self.distance_from_point(self.checkpoint3_x, self.checkpoint3_y)
+            #print(d)
+            if d <= 0.1:
+                self.state = "CHECKPOINT_3"
+                self.checkpoint3_reached = True
+
+                if self.checkpoint_initial_yaw is None:
+                    self.checkpoint_initial_yaw = self.yaw
+
+                self.publish_stop()
+                return 
+
+        # Evitamento ostacoli
+        self.detect_obstacle()
+        if self.obstacle_detected and self.state == "FORWARD":
+            self.state = "AVOID"
+
+        # Esegue la logica appropriata per lo stato corrente
+        if self.state == "AVOID":
+            self.avoid()
+        elif self.state == "FORWARD": 
+            self.move_forward()
+        elif self.state == "SCAN":
+            self.scan()
+        elif self.state == "CHECKPOINT_1":
+            self.checkpoint(direction=-1, check_num=1)
+        elif self.state == "CHECKPOINT_2":
+            self.checkpoint(direction=1, check_num=2)
+        elif self.state == "CHECKPOINT_3":
+            self.checkpoint(direction=1, check_num=3)    
+        elif self.state == "ANALYZE":
+            self.analyze()        
+
+# -----------------------------
+# MAIN
+# -----------------------------
+def main():
+    rclpy.init()
+    node = FiniteStateMachine()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.publish_stop()
+        rclpy.shutdown()
+        node.destroy_node()
+
+
+if __name__ == "__main__":
+    main()
