@@ -952,13 +952,16 @@ class ObstacleAvoidance(Node):
         elif self.state == "CHECKPOINT_5":
             self.checkpoint(direction=1, check_num=5)    
         elif self.state == "ANALYZE":
-            self.analyze()     
+            self.analyze()        
+
         '''
 
         if self.obstacle_detected:
             self.avoid()
         else:
-            self.publish_twist(0.5, 0.0)   
+            self.publish_twist(0.5, 0.0)
+
+        return
 
 # -----------------------------
 # MAIN
