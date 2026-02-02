@@ -86,59 +86,6 @@ class VisionDetectionNode(Node):
         self.avoiding = False
         self.aligning = False
 
-        self.obstacle_threshold = 0.4   # Distanza di sicurezza a cui evitare un ostacolo
-        self.current_distance = np.inf  # Distanza corrente da eventuali ostacoli
-
-        # Odometria di partenza in fase di evitamento ostacolo
-        self.start_avoiding_yaw = None
-
-        # Logica di stop
-        self.stopped = False
-
-        # Variabili relative ai checkpoint (bivi)
-        self.current_checkpoint = None
-
-        self.rotated_at_checkpoint = False
-        self.frontal_image = None
-        self.lateral_image = None
-        self.count_frontal_image = None
-        self.count_lateral_image = None
-
-        self.checkpoint_initial_yaw = None
-
-        self.checkpoint1_reached = False
-        self.checkpoint1_finished = False
-
-        self.checkpoint2_reached = False
-        self.checkpoint2_finished = False
-
-        self.checkpoint3_reached = False
-        self.checkpoint3_finished = False
-
-        self.checkpoint4_reached = False
-        self.checkpoint4_finished = False
-
-        self.checkpoint5_reached = False
-        self.checkpoint5_finished = False
-
-        self.checkpoint6_reached = False
-
-        # Coordinate dei checkpoint
-        self.checkpoint1_x = 0.525
-        self.checkpoint1_y = -2.000
-        self.checkpoint2_x = 0.525
-        self.checkpoint2_y = 0.525
-        self.checkpoint3_x = 0.525
-        self.checkpoint3_y = 1.875
-        self.checkpoint4_x = -1.975
-        self.checkpoint4_y = 1.875
-        self.checkpoint5_x = -1.975
-        self.checkpoint5_y = 0.500
-
-        # Ultimo checkpoint -> posizione finale
-        self.checkpoint6_x = -1.975
-        self.checkpoint6_y = -2.000
-
         # -----------------------------
         # ROS I/O
         # -----------------------------
@@ -150,7 +97,6 @@ class VisionDetectionNode(Node):
 
         self.odom_sub = self.create_subscription(Odometry, "/odom", self.odom_callback, qos)    # Riceve odometria
         self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)     # Riceve le immagini della camera
-        self.sub_scan = self.create_subscription(LaserScan, "/scan", self.on_scan, 10)          # Riceve il LIDAR
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)                             # Invia le velocità
         self.pub_image = self.create_publisher(Image, "/yolo/annotated_image", 10)              # Pubblica le immagini annotate con bounding box
 
@@ -219,39 +165,6 @@ class VisionDetectionNode(Node):
         except Exception as e:
             self.get_logger().warn(f"cv_bridge failed: {e}")
             return
-        
-        # Salva l'immagine per CHECKPOINT_1
-        if self.checkpoint1_reached and self.frontal_image is None and not self.checkpoint1_finished:
-            self.frontal_image = img_bgr.copy()
-            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-            return
-
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint1_finished:
-            self.lateral_image = img_bgr.copy()
-            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-            return
-        
-        # Salva l'immagine per CHECKPOINT_2
-        if self.checkpoint2_reached and self.frontal_image is None and not self.checkpoint2_finished:
-            self.frontal_image = img_bgr.copy()
-            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-            return
-
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint2_finished:
-            self.lateral_image = img_bgr.copy()
-            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-            return
-        
-        # Salva l'immagine per CHECKPOINT_5
-        if self.checkpoint5_reached and self.frontal_image is None and not self.checkpoint5_finished:
-            self.frontal_image = img_bgr.copy()
-            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-            return
-
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint5_finished:
-            self.lateral_image = img_bgr.copy()
-            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-            return
 
         # Estrae il canali BGR
         blue_channel = img_bgr[:, :, 0]
@@ -286,27 +199,6 @@ class VisionDetectionNode(Node):
             self.image_w = w
 
         return
-
-
-    # -----------------------------
-    # CALLBACK PER LIDAR
-    # -----------------------------
-    def on_scan(self, msg: LaserScan):
-        """
-        Callback per i dati LiDAR. Aggiorna la distanza minima frontale 
-        considerando un settore centrale di 40 campioni.
-        """
-
-        self.ranges = np.array(msg.ranges)
-
-        n = len(self.ranges)
-        center = n // 2
-        left = max(center - 20, 0)
-        right = min(center + 20, n)
-        if left < right:
-            self.current_distance = np.nanmin(self.ranges[left:right])
-        else:
-            self.current_distance = np.nanmin(self.ranges)
 
     # -----------------------------
     # METODI DI CONTROLLO
@@ -387,135 +279,6 @@ class VisionDetectionNode(Node):
 
     def print_message(self, message):
         self.get_logger().info(message)
-        
-
-    # -----------------------------
-    # RILEVAMENTO OSTACOLI
-    # -----------------------------
-    def detect_obstacle(self):
-        """
-        Verifica la presenza di ostacoli.
-
-        Prioritizza l'evitamento: un ostacolo è rilevato se la distanza LiDAR
-        frontale è inferiore alla soglia.
-        """
- 
-        # Rileva un ostacolo generico se la distanza LiDAR frontale è troppo piccola.
-        self.obstacle_detected = self.current_distance < self.obstacle_threshold
-
-
-    def align_to_next_checkpoint(self):
-        
-        goal_x = None
-        goal_y = None
-
-        # Determina la posizione del checkpoint a cui allinearsi (il successivo rispetto a quello raggiunto)
-        if self.current_checkpoint is None:
-            goal_x = self.checkpoint1_x
-            goal_y = self.checkpoint1_y
-        elif self.current_checkpoint == 1:
-            goal_x = self.checkpoint2_x
-            goal_y = self.checkpoint2_y       
-        elif self.current_checkpoint == 2:
-            goal_x = self.checkpoint3_x
-            goal_y = self.checkpoint3_y    
-        elif self.current_checkpoint == 3:
-            goal_x = self.checkpoint4_x
-            goal_y = self.checkpoint4_y
-        elif self.current_checkpoint == 4:
-            goal_x = self.checkpoint5_x
-            goal_y = self.checkpoint5_y
-        elif self.current_checkpoint == 5:
-            goal_x = self.checkpoint6_x
-            goal_y = self.checkpoint6_y
-
-        # Si allinea al prossimo checkpoint
-        target_yaw = self.calculate_target_yaw(goal_x, goal_y)
-        angle_err = self.angle_error(target_yaw)
-            
-        if abs(angle_err) > self.align_tol:
-            # Ruota con controllo proporzionale
-            angular_vel = max(min(0.8 * angle_err, self.turn_speed_max), -self.turn_speed_max)
-            self.publish_twist(0.0, angular_vel)
-        else:
-            self.aligning = False
-
-        return    
-
-    def check_for_checkpoint_reached(self):
-
-        # CHECKPOINT_1
-        if not self.checkpoint1_reached and not self.checkpoint1_finished:
-            d = self.distance_from_point(self.checkpoint1_x, self.checkpoint1_y)
-            #print(d)
-            if d <= 0.1:
-                self.state = "CHECKPOINT_1"
-                self.checkpoint1_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-                    
-                self.publish_stop()
-                return 
-            
-        # CHECKPOINT_2
-        if not self.checkpoint2_reached and not self.checkpoint2_finished:
-            d = self.distance_from_point(self.checkpoint2_x, self.checkpoint2_y)
-            #print(d)
-            if d <= 0.1:
-                self.state = "CHECKPOINT_2"
-                self.checkpoint2_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-
-                self.publish_stop()
-                return 
-            
-        # CHECKPOINT_3
-        if not self.checkpoint3_reached and not self.checkpoint3_finished:
-            d = self.distance_from_point(self.checkpoint3_x, self.checkpoint3_y)
-            #print(d)
-            if d <= 0.1:
-                self.checkpoint3_reached = True
-                self.checkpoint3_finished = True
-                self.current_checkpoint += 1
-                return      
-
-        # CHECKPOINT_4
-        if not self.checkpoint4_reached and not self.checkpoint4_finished:
-            d = self.distance_from_point(self.checkpoint4_x, self.checkpoint4_y)
-            #print(d)
-            if d <= 0.1:
-                self.checkpoint4_reached = True
-                self.checkpoint4_finished = True
-                self.current_checkpoint += 1
-                return       
-            
-        # CHECKPOINT_5
-        if not self.checkpoint5_reached and not self.checkpoint5_finished:
-            d = self.distance_from_point(self.checkpoint5_x, self.checkpoint5_y)
-            #print(d)
-            if d <= 0.1:
-                self.state = "CHECKPOINT_5"
-                print(self.state)
-                self.checkpoint5_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-
-                self.publish_stop()
-                return 
-            
-        # CHECKPOINT_6
-        if not self.checkpoint6_reached:
-            d = self.distance_from_point(self.checkpoint6_x, self.checkpoint6_y)
-            #print(d)
-            if d <= 0.1:
-                self.stopped = True     # Ferma definitivamente il robot
-
-                self.publish_stop()
-                return 
 
 
     # -----------------------------
@@ -683,55 +446,6 @@ class VisionDetectionNode(Node):
 
         return
 
-    # Evitamento ostacoli semplificato adattato al contesto
-    def avoid(self):
-
-        # Inizializzazione
-        if self.start_avoiding_yaw is None:
-            self.start_avoiding_yaw = self.yaw
-            self.avoid_step = 0 # 0: Guarda a sinistra, 1: Guarda a destra, 2: Guarda indietro
-            self.avoid_target_yaw = None
-            return
-
-        # Definisci l'angolo di rotazione per lo step corrente
-        if self.avoid_target_yaw is None:
-            if self.avoid_step == 0:
-                target_offset = math.pi / 2   # +90° (Sx)
-            elif self.avoid_step == 1:
-                target_offset = -math.pi / 2  # -90° (Dx)
-            else:
-                target_offset = -math.pi      # -180° (Indietro)
-            
-            self.avoid_target_yaw = self.normalize_angle(self.start_avoiding_yaw + target_offset)
-
-        # Ruota
-        angle_error = self.angle_error(self.avoid_target_yaw)
-
-        if abs(angle_error) > 0.1:
-            direction = 1.0 if angle_error > 0 else -1.0
-            self.publish_twist(0.0, direction * 0.5) 
-            return
-
-        self.publish_stop()
-        
-        if not self.obstacle_detected:
-            # Percorso libero
-            self.start_avoiding_yaw = None
-            self.avoid_target_yaw = None
-
-            self.search_start_x = self.search_start_y = self.search_start_yaw = None
-            self.aligning = True
-            self.state = "FORWARD"
-            return
-        else:
-            # Percorso bloccato: prova un'altra direzione
-            self.avoid_step += 1
-            self.avoid_target_yaw = None
-            
-            if self.avoid_step > 2:
-                self.stopped = True
-
-
     def analyze(self):
         """
         Esegue l'analisi della pianta tramite classificazione SVM.
@@ -807,98 +521,6 @@ class VisionDetectionNode(Node):
         self.search_start_x = self.search_start_y = self.search_start_yaw = None
         self.aligning = True
         self.state = "FORWARD"
-    
-    def checkpoint(self, direction, check_num):
-        """
-        Gestisce la logica di ispezione ai checkpoint tramite rotazione e confronto visivo.
-
-        Esegue una rotazione di 90° per acquisire un'immagine laterale, confronta il 
-        numero di pixel "malati" tra la vista frontale e quella laterale per decidere 
-        l'orientamento ottimale, quindi resetta lo stato per riprendere la navigazione.
-
-        Args:
-            direction (int): Direzione di rotazione (1 per sinistra, -1 per destra).
-            check_num (int): Identificativo numerico del checkpoint corrente.
-        """
-
-        # Attende che l'immagine frontale sia memorizzata
-        if self.frontal_image is None:
-            return
-        
-        # Ruota di 90 gradi nella direzione specificata 
-        angle_error = self.angle_error(self.checkpoint_initial_yaw + (direction*math.pi/2))
-
-        if abs(angle_error) >= 0.1 and not self.rotated_at_checkpoint:
-            self.publish_twist(0.0, 0.3*direction)
-            print(f"Rotating: {self.rotated_at_checkpoint}")
-            return
-        
-        if not self.rotated_at_checkpoint:
-            self.rotated_at_checkpoint = True
-            self.publish_stop()     # Smette di ruotare
-
-        if self.lateral_image is None:
-            return
-        
-
-        # Confronta le due immagini e decide la direzione da prendere
-        if self.count_frontal_image is None:
-            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-            return
-        
-        if self.count_lateral_image is None:
-            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-            return
-
-        print(f"FRONTAL IMAGE COUNT: {self.count_frontal_image}")
-        print(f"LATERAL IMAGE COUNT: {self.count_lateral_image}")
-
-        if self.count_frontal_image < self.count_lateral_image:
-            self.publish_stop()     # Assicura che il robot non ruoti
-
-        else:
-
-            # Si riallinea alla direzione iniziale
-            angle_error = self.angle_error(self.checkpoint_initial_yaw)
-
-            if abs(angle_error) >= 0.1:
-                self.publish_twist(0.0, -0.3*direction)
-                return
-
-        if check_num == 1:
-            self.checkpoint1_reached = False      
-            self.checkpoint1_finished = True
-        elif check_num == 2:
-            self.checkpoint2_reached = False      
-            self.checkpoint2_finished = True     
-        elif check_num == 5:
-            self.checkpoint5_reached = False
-            self.checkpoint5_finished = True
-
-        # Resetta le variabili generiche di stato CHECKPOINT
-        self.rotated_at_checkpoint = False
-        self.frontal_image = None
-        self.lateral_image = None
-        self.count_frontal_image = None
-        self.count_lateral_image = None   
-        self.checkpoint_initial_yaw = None      
-
-        # Incrementa il checkpoint corrente
-        if self.current_checkpoint is None:
-            self.current_checkpoint = 1
-        else:
-            self.current_checkpoint += 1 
-
-        # Resetta le variabili relative allo stato FORWARD
-        self.search_start_x = None
-        self.search_start_y = None
-        self.search_start_yaw = None
-
-        self.aligning = True
-
-        self.state = "FORWARD"
-        return
-
 
     # -----------------------------
     # CONTROL LOOP
@@ -916,33 +538,6 @@ class VisionDetectionNode(Node):
             self.publish_stop()
             return
         
-        
-        '''
-        # Controlla se è a un bivio
-        self.check_for_checkpoint_reached()
-
-        # Evitamento ostacoli
-        self.detect_obstacle()
-        if self.obstacle_detected and self.state == "FORWARD":
-            self.state = "AVOID"
-
-        # Esegue la logica appropriata per lo stato corrente
-        if self.state == "AVOID":
-            self.avoid()
-        elif self.state == "FORWARD": 
-            self.move_forward()
-        elif self.state == "SCAN":
-            self.scan()
-        elif self.state == "CHECKPOINT_1":
-            self.checkpoint(direction=-1, check_num=1)
-        elif self.state == "CHECKPOINT_2":
-            self.checkpoint(direction=1, check_num=2)
-        elif self.state == "CHECKPOINT_5":
-            self.checkpoint(direction=1, check_num=5)    
-        elif self.state == "ANALYZE":
-            self.analyze()        
-
-        '''
 
         if self.state == "FORWARD":
             self.move_forward()
