@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        	'vision_detection = vision_detection.vision_detection:main',
+        	'vision_detection_runner = vision_detection.vision_detection:main',
         ],
     },
 )
