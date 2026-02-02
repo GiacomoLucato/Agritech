@@ -14,7 +14,6 @@ from geometry_msgs.msg import Twist                                             
 from cv_bridge import CvBridge                                                   # type: ignore
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy         # type: ignore
 import cv2
-import joblib
 import random
 
 

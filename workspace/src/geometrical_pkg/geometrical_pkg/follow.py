@@ -328,7 +328,7 @@ class Turtlebot3SquarePath(Node):
         rate_dt = 1.0 / self.rate_hz
         steps = int(duration * self.rate_hz)
 
-        for _ in range(steps):
+        while True:
             if not rclpy.ok() or not self.is_running:
                 break
 
@@ -356,8 +356,9 @@ def main(args=None):
     spin_thread.start()
 
     try:
-        # node.run_square_path(side_length=0.5, duration=12.0)
-        node.follow_polygon(n_edges=6, side_length=0.4, duration=10.0)
+        # node.run_square_path(side_length=1.0, duration=12.0)
+        # node.follow_polygon(n_edges=6, side_length=0.4, duration=10.0)
+        node.follow_circle(0.6, 5.0)
     except KeyboardInterrupt:
         pass
     finally:
