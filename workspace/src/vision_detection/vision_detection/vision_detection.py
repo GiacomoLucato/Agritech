@@ -269,7 +269,7 @@ class VisionDetectionNode(Node):
         total_pixels = img_bgr.shape[0] * img_bgr.shape[1]
         percentage = (light_green_count / total_pixels) * 100
 
-        if percentage > 3.0:
+        if percentage > 0.5:
             self.get_logger().warn(f"WARNING: Light green detection high! Ratio: {percentage:.2f}%")
 
             if self.state == "SCAN":
@@ -540,11 +540,6 @@ class VisionDetectionNode(Node):
         
         # Controllo di sicurezza: se lo stato interno non è FORWARD -> ritorna subito
         if self.state != "FORWARD": 
-            return
-        
-        # Ruota verso il prossimo checkpoint (bivio)
-        if self.aligning:
-            self.align_to_next_checkpoint()
             return
 
         # Salva odometria di partenza  
