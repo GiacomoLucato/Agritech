@@ -156,32 +156,8 @@ class ObstacleAvoidance(Node):
 
         self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)           # Ciclo di controllo principale
 
-        self.load_model()
         self.get_logger().info(f"Node loaded...")
 
-    # -----------------------------
-    # CARICAMENTO MODELLO SVM
-    # -----------------------------
-    def load_model(self):
-        """
-        Carica il modello SVM e le etichette delle classi dai file joblib.
-
-        Inizializza:
-            self.model: Il classificatore caricato.
-            self.class_names: Le etichette associate al modello.
-        """
-        
-
-
-        # Espande il simbolo '~' o recupera automaticamente /home/nome_utente
-        home = os.path.expanduser("~")
-        model_path = os.path.join(home, "Agritech/workspace/assets/leaf_svm_model.joblib")
-        labels_path = os.path.join(home, "Agritech/workspace/assets/leaf_labels.joblib")
-
-        t0 = time.time()
-        self.model = joblib.load(model_path)
-        self.class_names = joblib.load(labels_path)
-        self.get_logger().info(f"Loaded SVM model in {time.time() - t0:.2f}s")
 
     # -----------------------------
     # CALLBACK PER ODOMETRIA
@@ -202,89 +178,6 @@ class ObstacleAvoidance(Node):
     # CALLBACK PER CAMERA
     # -----------------------------
     def on_image(self, msg: Image):
-        """
-        Callback per l'elaborazione delle immagini.
-
-        Converte il messaggio ROS in OpenCV, gestisce il salvataggio dei frame ai 
-        checkpoint e analizza la presenza di pixel "verde chiaro" per il 
-        rilevamento di piante potenzialmente malate.
-
-        Args:
-            msg (Image): Messaggio immagine ricevuto dal sensore.
-        """
-
-        # Converte da ROS a OpenCV
-        try:
-            img_bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-        except Exception as e:
-            self.get_logger().warn(f"cv_bridge failed: {e}")
-            return
-        
-        # Salva l'immagine per CHECKPOINT_1
-        if self.checkpoint1_reached and self.frontal_image is None and not self.checkpoint1_finished:
-            self.frontal_image = img_bgr.copy()
-            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-            return
-
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint1_finished:
-            self.lateral_image = img_bgr.copy()
-            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-            return
-        
-        # Salva l'immagine per CHECKPOINT_2
-        if self.checkpoint2_reached and self.frontal_image is None and not self.checkpoint2_finished:
-            self.frontal_image = img_bgr.copy()
-            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-            return
-
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint2_finished:
-            self.lateral_image = img_bgr.copy()
-            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-            return
-        
-        # Salva l'immagine per CHECKPOINT_5
-        if self.checkpoint5_reached and self.frontal_image is None and not self.checkpoint5_finished:
-            self.frontal_image = img_bgr.copy()
-            self.count_frontal_image = self.count_ill_pixels(self.frontal_image)
-            return
-
-        if self.rotated_at_checkpoint and self.lateral_image is None and not self.checkpoint5_finished:
-            self.lateral_image = img_bgr.copy()
-            self.count_lateral_image = self.count_ill_pixels(self.lateral_image)
-            return
-
-        # Estrae il canali BGR
-        blue_channel = img_bgr[:, :, 0]
-        green_channel = img_bgr[:, :, 1]
-        red_channel = img_bgr[:, :, 2]
-
-        # Applica la condizione per trovare verde chiaro (piante potenzialmente malate)
-        condition = (green_channel > 80) & (green_channel < 190) & \
-                    (red_channel < 110) & (red_channel > 50) & \
-                    (blue_channel < 70)
-
-        light_green_count = np.count_nonzero(condition)
-
-        # Calcola la percentuale
-        total_pixels = img_bgr.shape[0] * img_bgr.shape[1]
-        percentage = (light_green_count / total_pixels) * 100
-
-        if percentage > 3.0:
-            self.get_logger().warn(f"WARNING: Light green detection high! Ratio: {percentage:.2f}%")
-
-            if self.state == "SCAN":
-
-                if self.turning_right:
-                    self.ill_plant_detected_right = True
-                
-                if self.turning_left:
-                    self.ill_plant_detected_left = True
-
-        h, w = img_bgr.shape[:2]
-
-        if self.image_w is None:
-            self.image_w = w
-
         return
 
 
@@ -448,13 +341,9 @@ class ObstacleAvoidance(Node):
             d = self.distance_from_point(self.checkpoint1_x, self.checkpoint1_y)
             #print(d)
             if d <= 0.1:
-                self.state = "CHECKPOINT_1"
                 self.checkpoint1_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-                    
-                self.publish_stop()
+                self.checkpoint1_finished = True
+                self.current_checkpoint = 1
                 return 
             
         # CHECKPOINT_2
@@ -462,13 +351,9 @@ class ObstacleAvoidance(Node):
             d = self.distance_from_point(self.checkpoint2_x, self.checkpoint2_y)
             #print(d)
             if d <= 0.1:
-                self.state = "CHECKPOINT_2"
                 self.checkpoint2_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-
-                self.publish_stop()
+                self.checkpoint2_finished = True
+                self.current_checkpoint += 1
                 return 
             
         # CHECKPOINT_3
@@ -496,14 +381,9 @@ class ObstacleAvoidance(Node):
             d = self.distance_from_point(self.checkpoint5_x, self.checkpoint5_y)
             #print(d)
             if d <= 0.1:
-                self.state = "CHECKPOINT_5"
-                print(self.state)
                 self.checkpoint5_reached = True
-
-                if self.checkpoint_initial_yaw is None:
-                    self.checkpoint_initial_yaw = self.yaw
-
-                self.publish_stop()
+                self.checkpoint5_finished = True
+                self.current_checkpoint += 1    
                 return 
             
         # CHECKPOINT_6
@@ -916,33 +796,8 @@ class ObstacleAvoidance(Node):
         if self.x is None or self.yaw is None or self.ranges is None:
             self.publish_stop()
             return
-        
-        '''
-        # Controlla se è a un bivio
-        self.check_for_checkpoint_reached()
 
-        # Evitamento ostacoli
-        self.detect_obstacle()
-        if self.obstacle_detected and self.state == "FORWARD":
-            self.state = "AVOID"
-
-        # Esegue la logica appropriata per lo stato corrente
-        if self.state == "AVOID":
-            self.avoid()
-        elif self.state == "FORWARD": 
-            self.move_forward()
-        elif self.state == "SCAN":
-            self.scan()
-        elif self.state == "CHECKPOINT_1":
-            self.checkpoint(direction=-1, check_num=1)
-        elif self.state == "CHECKPOINT_2":
-            self.checkpoint(direction=1, check_num=2)
-        elif self.state == "CHECKPOINT_5":
-            self.checkpoint(direction=1, check_num=5)    
-        elif self.state == "ANALYZE":
-            self.analyze()        
-
-        '''
+        # self.check_for_checkpoint_reached()
 
         self.detect_obstacle()
         if self.obstacle_detected and self.state == "FORWARD":
@@ -952,6 +807,7 @@ class ObstacleAvoidance(Node):
         if self.state == "AVOID":
             self.avoid()
         elif self.state == "FORWARD":
+            # self.align_to_next_checkpoint()
             self.publish_twist(0.5, 0.0)
 
         
