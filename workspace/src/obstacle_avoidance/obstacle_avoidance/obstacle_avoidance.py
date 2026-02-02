@@ -29,20 +29,12 @@ class ObstacleAvoidance(Node):
         self.turn_speed_max = self.get_parameter("turn_speed_max").value
 
         # CAMERA E IMMAGINE
-        self.image_w = None         # Ampiezza immagine (width)
-
         self.bridge = CvBridge()
-
-        # MODELLO
-        self.model = None
 
         # CONTROLLO MOVIMENTO
         self.rate_hz = 20
         self.forward_speed = 0.4        # Velocità lineare
         self.align_tol = 0.05           # Errore tollerato in fase di riallineamento
-
-        # VARIABILE DI STATO
-        self.state = "FORWARD"  # Indica lo stato interno della FSM
 
         # ODOMETRIA
         # Odometria corrente
@@ -63,27 +55,13 @@ class ObstacleAvoidance(Node):
         self.search_start_y = None
         self.search_start_yaw = None
 
-        # Variabili di stato per la fase di "SCAN"
-        self.turning_right = True
-        self.turning_left = False
         self.realigning = False
-
-        self.right_target_yaw = None
-        self.left_target_yaw = None
-        self.realigning_target_yaw = None
-
-        # Variabile di stato che indica se una pianta malata è stata identificata
-        self.ill_plant_detected = False
-        self.ill_plant_detected_left = False
-        self.ill_plant_detected_right = False
 
         # RILEVAMENTO OSTACOLI
         self.ranges = []
 
         self.obstacle_detected = False
-        self.avoiding_dir = 1   # Sinistra di default
         self.avoiding = False
-        self.aligning = False
 
         self.obstacle_threshold = 0.4   # Distanza di sicurezza a cui evitare un ostacolo
         self.current_distance = np.inf  # Distanza corrente da eventuali ostacoli
@@ -96,14 +74,6 @@ class ObstacleAvoidance(Node):
 
         # Variabili relative ai checkpoint (bivi)
         self.current_checkpoint = None
-
-        self.rotated_at_checkpoint = False
-        self.frontal_image = None
-        self.lateral_image = None
-        self.count_frontal_image = None
-        self.count_lateral_image = None
-
-        self.checkpoint_initial_yaw = None
 
         self.checkpoint1_reached = False
         self.checkpoint1_finished = False
@@ -141,7 +111,6 @@ class ObstacleAvoidance(Node):
         self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)     # Riceve le immagini della camera
         self.sub_scan = self.create_subscription(LaserScan, "/scan", self.on_scan, 10)          # Riceve il LIDAR
         self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)                             # Invia le velocità
-        self.pub_image = self.create_publisher(Image, "/yolo/annotated_image", 10)              # Pubblica le immagini annotate con bounding box
 
         self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)           # Ciclo di controllo principale
 
@@ -289,9 +258,7 @@ class ObstacleAvoidance(Node):
             angular_vel = max(min(0.8 * angle_err, self.turn_speed_max), -self.turn_speed_max)
             self.publish_twist(0.0, angular_vel)
         else:
-            self.aligning = False
-
-            self.state = "FORWARD"
+            self.realigning = False
 
         return    
 
@@ -322,6 +289,12 @@ class ObstacleAvoidance(Node):
             d = self.distance_from_point(self.checkpoint3_x, self.checkpoint3_y)
             #print(d)
             if d <= 0.1:
+                if self.checkpoint4_reached:
+                    self.stopped = True     # End of the task
+                    self.publish_stop()
+                    return
+                
+                # Else, go toward checkpoint 4
                 self.checkpoint3_reached = True
                 self.checkpoint3_finished = True
                 self.current_checkpoint += 1
@@ -332,9 +305,12 @@ class ObstacleAvoidance(Node):
             d = self.distance_from_point(self.checkpoint4_x, self.checkpoint4_y)
             #print(d)
             if d <= 0.1:
-                self.stopped = True     # Ferma definitivamente il robot
+                self.checkpoint4_reached = True
 
-                self.publish_stop()
+                # Head toward checkpoint 3 again
+                self.checkpoint3_reached = False
+                self.checkpoint3_finished = False
+                self.current_checkpoint = 2     # Hardcoded, do not change
                 return 
 
 
@@ -375,8 +351,9 @@ class ObstacleAvoidance(Node):
             # PATH CLEAR: Exit avoidance and go forward
             self.start_avoiding_yaw = None
             self.avoid_target_yaw = None
+            self.avoiding = False
+            self.realigning = True
 
-            self.state = "ALIGN"
             return
         else:
             # PATH BLOCKED: Try the next direction
@@ -399,23 +376,60 @@ class ObstacleAvoidance(Node):
         l'esecuzione dei comportamenti di navigazione, scansione e analisi.
         """
 
-        if self.x is None or self.yaw is None or self.ranges is None:
+        if self.x is None or self.yaw is None or self.stopped:
             self.publish_stop()
             return
 
+        # Check if a checkpoint has been reached
         self.check_for_checkpoint_reached()
 
+        # Check if any obstacle is in front
         self.detect_obstacle()
-        if self.obstacle_detected and self.state == "FORWARD":
-            self.state = "AVOID"
 
+        # If an obstacle is in front and the agent is not avoiding an obstacle already, it should avoid it
+        if self.obstacle_detected and not self.avoiding:
+            self.avoiding = True
+            
 
-        if self.state == "AVOID":
+        if self.avoiding:
+
             self.avoid()
-        elif self.state == "FORWARD":
-            self.publish_twist(0.5, 0.0)
-        elif self.state == "ALIGN":
-            self.align_to_next_checkpoint()
+
+        else:
+            
+            if not self.realigning:
+
+                # Save current odometry
+                if self.search_start_x is None:
+                    self.search_start_y = self.y
+                    self.search_start_yaw = self.yaw
+                    self.search_start_x = self.x
+
+                # Proceed for predefined straight distance
+                d = self.distance_from_point(self.search_start_x, self.search_start_y)
+
+                if d >= self.search_straight_distance:
+                    self.publish_stop()
+
+                    # Reset parameters for current phase
+                    self.search_start_x = None
+                    self.search_start_y = None
+                    self.search_start_yaw = None
+
+                    self.realigning = True
+
+                    return
+
+                # Altrimenti, prosegue dritto
+                self.publish_twist(self.forward_speed, 0.0)
+            
+            else:
+                # Align to next checkpoint (safety constraint)
+                self.align_to_next_checkpoint()
+
+                return
+            
+        return
 
         
 
