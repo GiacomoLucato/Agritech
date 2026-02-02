@@ -687,62 +687,50 @@ class ObstacleAvoidance(Node):
 
         return
 
-    # Evitamento ostacoli semplificato adattato al contesto
     def avoid(self):
-
-        # Define the avoidance sequence (relative angles)
-        # Order: +45, +90, -90, -45, -180
-        avoid_angles = [
-            math.pi / 4,     # +45°
-            math.pi / 2,     # +90°
-            -math.pi / 2,    # -90°
-            -math.pi / 4,    # -45°
-            -math.pi        # -180° (dead end escape)
-        ]
-
-        # First entry into AVOID
+        # 1. Initialize Avoidance
         if self.start_avoiding_yaw is None:
             self.start_avoiding_yaw = self.yaw
-            self.avoid_step = 0
+            self.avoid_step = 0 # 0: Look Left, 1: Look Right, 2: Look Back
             self.avoid_target_yaw = None
             return
 
-        # If front is clear → exit avoidance
-        if not self.obstacle_detected:
-            self.start_avoiding_yaw = None
-            self.avoid_target_yaw = None
-            self.avoid_step = 0
-
-            self.search_start_x = None
-            self.search_start_y = None
-            self.search_start_yaw = None
-
-            self.aligning = True
-            self.state = "FORWARD"
-            return
-
-        # If all steps exhausted, just keep last orientation
-        if self.avoid_step >= len(avoid_angles):
-            return
-
-        # Set target yaw for current step (once)
+        # 2. Define the target angle for the current step
         if self.avoid_target_yaw is None:
-            self.avoid_target_yaw = self.normalize_angle(
-                self.start_avoiding_yaw + avoid_angles[self.avoid_step]
-            )
+            if self.avoid_step == 0:
+                target_offset = math.pi / 2   # +90° (Left)
+            elif self.avoid_step == 1:
+                target_offset = -math.pi / 2  # -90° (Right)
+            else:
+                target_offset = -math.pi      # -180° (Back)
+            
+            self.avoid_target_yaw = self.normalize_angle(self.start_avoiding_yaw + target_offset)
 
-        # Rotate toward target
+        # 3. Rotate toward the target
         angle_error = self.angle_error(self.avoid_target_yaw)
 
         if abs(angle_error) > 0.1:
             direction = 1.0 if angle_error > 0 else -1.0
-            self.publish_twist(0.0, direction * 0.3)
+            self.publish_twist(0.0, direction * 0.5) # Slightly faster rotation
             return
 
-        # Step completed → move to next step
+        # 4. Rotation reached! Now check the path
         self.publish_stop()
-        self.avoid_step += 1
-        self.avoid_target_yaw = None
+        
+        if not self.obstacle_detected:
+            # PATH CLEAR: Exit avoidance and go forward
+            self.start_avoiding_yaw = None
+            self.avoid_target_yaw = None
+            self.state = "FORWARD"
+            return
+        else:
+            # PATH BLOCKED: Try the next direction
+            self.avoid_step += 1
+            self.avoid_target_yaw = None
+            
+            # If we've finished looking back, we just stop or force a move
+            if self.avoid_step > 2:
+                self.state = "STOPPED" # Or handle "stuck" state
 
 
     def analyze(self):
@@ -956,12 +944,17 @@ class ObstacleAvoidance(Node):
 
         '''
 
-        if self.obstacle_detected:
+        self.detect_obstacle()
+        if self.obstacle_detected and self.state == "FORWARD":
+            self.state = "AVOID"
+
+
+        if self.state == "AVOID":
             self.avoid()
-        else:
+        elif self.state == "FORWARD":
             self.publish_twist(0.5, 0.0)
 
-        return
+        
 
 # -----------------------------
 # MAIN
