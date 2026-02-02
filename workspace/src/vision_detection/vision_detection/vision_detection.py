@@ -44,6 +44,7 @@ class VisionDetectionNode(Node):
 
         # VARIABILE DI STATO
         self.state = "FORWARD"  # Indica lo stato interno della FSM
+        self.stopped = False    # Flag to stop forever the robot
 
         # ODOMETRIA
         # Odometria corrente
