@@ -43,7 +43,8 @@ class VisionDetectionNode(Node):
         self.align_tol = 0.05           # Errore tollerato in fase di riallineamento
 
         # VARIABILE DI STATO
-        self.state = "FORWARD"  # Indica lo stato interno della FSM
+        self.scanning = False
+        self.analyzing = False
         self.stopped = False    # Flag to stop forever the robot
 
         # ODOMETRIA
@@ -186,7 +187,7 @@ class VisionDetectionNode(Node):
         if percentage > 0.5:
             self.get_logger().warn(f"WARNING: Light green detection high! Ratio: {percentage:.2f}%")
 
-            if self.state == "SCAN":
+            if self.scanning:
 
                 if self.turning_right:
                     self.ill_plant_detected_right = True
@@ -285,62 +286,6 @@ class VisionDetectionNode(Node):
     # -----------------------------
     # METODI DI STATO
     # -----------------------------
-    def move_forward(self):
-
-        """
-        Gestisce la fase di avanzamento rettilineo durante la modalità di ricerca.
-        
-        Il metodo esegue le seguenti operazioni:
-        1. Verifica che lo stato corrente sia effettivamente "FORWARD".
-        2. Memorizza la posizione iniziale (odometria) al primo avvio della manovra.
-        3. Calcola la distanza percorsa rispetto al punto di partenza.
-        4. Se la distanza percorsa è uguale o superiore a 'search_straight_distance':
-           - Arresta il robot.
-           - Resetta tutti i parametri di navigazione e orientamento.
-           - Passa allo stato "SCAN" per iniziare la rotazione di ricerca.
-        5. Se la distanza non è stata ancora raggiunta, continua a pubblicare
-           un comando di velocità lineare costante.
-        """
-        
-        # Controllo di sicurezza: se lo stato interno non è FORWARD -> ritorna subito
-        if self.state != "FORWARD": 
-            return
-
-        # Salva odometria di partenza  
-        if self.search_start_x is None:
-            self.search_start_y = self.y
-            self.search_start_yaw = self.yaw
-            self.search_start_x = self.x
-
-        # Avanza per la distanza indicata, poi passa allo stato "SCAN"
-        d = self.distance_from_point(self.search_start_x, self.search_start_y)
-
-        if d >= self.search_straight_distance:
-            self.publish_stop()
-
-            # Resetta i parametri di scansione 
-            self.turning_right = True
-            self.turning_left = False
-            self.realigning = False
-
-            self.right_target_yaw = None
-            self.left_target_yaw = None
-            self.realigning_target_yaw = None
-
-            # Resetta i parametri di stato
-            self.search_start_x = None
-            self.search_start_y = None
-            self.search_start_yaw = None
-
-            self.state = "SCAN"
-
-            return
-
-        # Altrimenti, prosegue dritto
-        self.publish_twist(self.forward_speed, 0.0)
-
-        return
-
     def scan(self):
         """
         Esegue una manovra di scansione angolare sul posto per cercare il target.
@@ -359,7 +304,7 @@ class VisionDetectionNode(Node):
            analizzare un campione raccolto della pianta in questione.
         """
         # Controllo di sicurezza: se lo stato interno non è SCAN -> ritorna immediatamente
-        if self.state != "SCAN":
+        if not self.scanning:
             return
 
         # Gira a destra
@@ -423,9 +368,8 @@ class VisionDetectionNode(Node):
                     self.ill_plant_detected_left = False
                     self.ill_plant_detected_right = False
 
-                    self.aligning = True
-
-                    self.state = "ANALYZE"
+                    self.scanning = False
+                    self.analyzing = True
 
                     return
 
@@ -435,9 +379,7 @@ class VisionDetectionNode(Node):
                 self.search_start_y = None
                 self.search_start_yaw = None
 
-                self.aligning = True
-
-                self.state = "FORWARD"
+                self.scanning = False
 
                 return
             
@@ -488,8 +430,7 @@ class VisionDetectionNode(Node):
 
             # Reset variabili di stato e ripresa navigazione
             self.search_start_x = self.search_start_y = self.search_start_yaw = None
-            self.aligning = True
-            self.state = "FORWARD"
+            self.analyzing = False
             return
 
         # Elaborazione immagine
@@ -520,8 +461,7 @@ class VisionDetectionNode(Node):
 
         # Reset variabili di stato e ripresa navigazione
         self.search_start_x = self.search_start_y = self.search_start_yaw = None
-        self.aligning = True
-        self.state = "FORWARD"
+        self.analyzing = False
 
     # -----------------------------
     # CONTROL LOOP
@@ -535,21 +475,47 @@ class VisionDetectionNode(Node):
         l'esecuzione dei comportamenti di navigazione, scansione e analisi.
         """
 
-        if self.x is None or self.yaw is None or self.ranges is None or self.stopped:
+        if self.x is None or self.yaw is None or self.stopped:
             self.publish_stop()
             return
-        
 
-        if self.state == "FORWARD":
-            self.move_forward()
-        elif self.state == "SCAN":
+
+        if self.scanning:
             self.scan()
-        elif self.state == "ANALYZE":
+        elif self.analyzing:
             self.analyze()
         else:
-            self.print_message("Unreckognized state. SAFETY BREACH -> STOP")
-            self.publish_stop()
-            self.stopped = True
+
+            # Salva odometria di partenza  
+            if self.search_start_x is None:
+                self.search_start_y = self.y
+                self.search_start_yaw = self.yaw
+                self.search_start_x = self.x
+
+            # Avanza per la distanza indicata, poi passa allo stato "SCAN"
+            d = self.distance_from_point(self.search_start_x, self.search_start_y)
+
+            if d >= self.search_straight_distance:
+                self.publish_stop()
+
+                # Resetta i parametri di scansione 
+                self.turning_right = True
+                self.turning_left = False
+                self.realigning = False
+
+                self.right_target_yaw = None
+                self.left_target_yaw = None
+                self.realigning_target_yaw = None
+
+                # Resetta i parametri di stato
+                self.search_start_x = None
+                self.search_start_y = None
+                self.search_start_yaw = None
+
+                self.scanning = True
+
+            # Altrimenti, prosegue dritto
+            self.publish_twist(self.forward_speed, 0.0)
 
 # -----------------------------
 # MAIN
