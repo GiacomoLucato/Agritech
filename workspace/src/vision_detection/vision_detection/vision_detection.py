@@ -40,7 +40,7 @@ class VisionDetectionNode(Node):
         # CONTROLLO MOVIMENTO
         self.rate_hz = 20
         self.forward_speed = 0.4        # Velocità lineare
-        self.align_tol = 0.05           # Errore tollerato in fase di riallineamento
+        self.align_tol = 0.03           # Errore tollerato in fase di riallineamento
 
         # VARIABILE DI STATO
         self.scanning = False
@@ -87,6 +87,10 @@ class VisionDetectionNode(Node):
         self.avoiding_dir = 1   # Sinistra di default
         self.avoiding = False
         self.aligning = False
+
+        # Coordinates of Final Position
+        self.goal_x = -1.975
+        self.goal_y = -0.025
 
         # -----------------------------
         # ROS I/O
@@ -357,7 +361,9 @@ class VisionDetectionNode(Node):
                 self.realigning_target_yaw = self.start_spinning_yaw
 
             # Se ha completato il riallineamento: smette di ruotare e torna allo stato FORWARD
-            if abs(self.angle_error(self.realigning_target_yaw)) < self.align_tol:
+            target_yaw = self.calculate_target_yaw(self.goal_x, self.goal_y)
+            angle_err = self.angle_error(target_yaw)
+            if abs(angle_err) < self.align_tol:
                 self.publish_stop()
                 self.realigning_target_yaw = None
                 self.realigning = False
@@ -384,7 +390,8 @@ class VisionDetectionNode(Node):
                 return
             
             # Altrimenti, gira a destra
-            self.publish_twist(0.0, -0.5)
+            angular_vel = max(min(0.8 * angle_err, self.turn_speed_max), -self.turn_speed_max)
+            self.publish_twist(0.0, angular_vel)
             return
 
         return
@@ -452,10 +459,14 @@ class VisionDetectionNode(Node):
                     1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
         # Pubblicazione immagine annotata
+        # Convert BGR to RGB
+        img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
+
         try:
-            annotated_msg = self.bridge.cv2_to_imgmsg(display_img, encoding="bgr8")
+            # Use "rgb8" encoding
+            annotated_msg = self.bridge.cv2_to_imgmsg(img_rgb, encoding="rgb8")
             self.pub_image.publish(annotated_msg)
-            self.get_logger().info(f"Analisi completata [{subfolder}]: {text}")
+            self.get_logger().info(f"Analisi completata: {text}")
         except Exception as e:
             self.get_logger().error(f"Errore pubblicazione immagine: {e}")
 
@@ -477,6 +488,15 @@ class VisionDetectionNode(Node):
 
         if self.x is None or self.yaw is None or self.stopped:
             self.publish_stop()
+            return
+        
+
+        # Compute distance to final position
+        d = self.distance_from_point(self.goal_x, self.goal_y)
+
+        if d <= 0.1:
+            self.publish_stop()
+            self.stopped = True
             return
 
 

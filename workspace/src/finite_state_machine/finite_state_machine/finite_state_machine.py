@@ -801,10 +801,12 @@ class FiniteStateMachine(Node):
                     1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
         # Pubblicazione immagine annotata
+        img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
         try:
-            annotated_msg = self.bridge.cv2_to_imgmsg(display_img, encoding="bgr8")
+            # Use "rgb8" encoding
+            annotated_msg = self.bridge.cv2_to_imgmsg(img_rgb, encoding="rgb8")
             self.pub_image.publish(annotated_msg)
-            self.get_logger().info(f"Analisi completata [{subfolder}]: {text}")
+            self.get_logger().info(f"Analisi completata: {text}")
         except Exception as e:
             self.get_logger().error(f"Errore pubblicazione immagine: {e}")
 
