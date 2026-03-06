@@ -978,6 +978,49 @@ class FiniteStateMachine(Node):
         self.state = "FORWARD"
         return     
 
+    # -----------------------------
+    # CONTROL LOOP
+    # -----------------------------
+    def control_loop(self):
+        """
+        Main robot control loop (Finite State Machine).
+
+        Manages state transitions based on position (checkpoints), 
+        safety (obstacle avoidance), and mission logic. Coordinates 
+        the execution of navigation, scanning, and analysis behaviors.
+        """
+
+        # Ensure sensors (Odom/Lidar) are initialized before proceeding
+        if self.x is None or self.yaw is None or self.ranges is None:
+            self.publish_stop()
+            return
+        
+        # Check if a junction or checkpoint has been reached
+        self.check_for_checkpoint_reached()
+
+        # Obstacle avoidance logic
+        self.detect_obstacle()
+        if self.obstacle_detected and self.state == "FORWARD":
+            self.state = "AVOID"
+
+        # Execute the logic appropriate for the current state
+        if self.state == "AVOID":
+            self.avoid()
+        elif self.state == "FORWARD": 
+            self.move_forward()
+        elif self.state == "SCAN":
+            self.scan()
+        elif self.state == "CHECKPOINT_1":
+            # Pass direction -1 (Left/Counter-clockwise)
+            self.checkpoint(direction=-1, check_num=1)
+        elif self.state == "CHECKPOINT_2":
+            # Pass direction 1 (Right/Clockwise)
+            self.checkpoint(direction=1, check_num=2)
+        elif self.state == "CHECKPOINT_5":
+            self.checkpoint(direction=1, check_num=5)    
+        elif self.state == "ANALYZE":
+            self.analyze()
+
 # -----------------------------
 # MAIN
 # -----------------------------
