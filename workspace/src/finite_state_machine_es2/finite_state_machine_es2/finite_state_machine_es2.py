@@ -909,12 +909,7 @@ class FiniteStateMachine(Node):
             self.scan()
         elif self.state == "CHECKPOINT_1":
             # Pass direction -1 (Left/Counter-clockwise)
-            self.checkpoint(direction=-1, check_num=1)
-        elif self.state == "CHECKPOINT_2":
-            # Pass direction 1 (Right/Clockwise)
-            self.checkpoint(direction=1, check_num=2)
-        elif self.state == "CHECKPOINT_5":
-            self.checkpoint(direction=1, check_num=5)    
+            self.checkpoint(direction=-1, check_num=1)   
         elif self.state == "ANALYZE":
             self.analyze()
 
