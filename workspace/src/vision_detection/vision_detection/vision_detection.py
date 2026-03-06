@@ -13,7 +13,6 @@ from nav_msgs.msg import Odometry                                               
 from geometry_msgs.msg import Twist                                              # type: ignore
 from cv_bridge import CvBridge                                                   # type: ignore
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy         # type: ignore
-import cv2
 import joblib
 import random
 
@@ -22,51 +21,51 @@ class VisionDetectionNode(Node):
     def __init__(self):
         super().__init__("limo_yolo")
 
-        # PARAMETRI ROS
+        # ROS PARAMETERS
         self.declare_parameter("image_topic", "/image")
-        self.declare_parameter("turn_speed_max", 1.5)           # Velocità angolare massima
+        self.declare_parameter("turn_speed_max", 1.5)           # Maximum angular velocity
 
         self.img_topic = self.get_parameter("image_topic").value
         self.turn_speed_max = self.get_parameter("turn_speed_max").value
 
-        # CAMERA E IMMAGINE
-        self.image_w = None         # Ampiezza immagine (width)
-
+        # CAMERA AND IMAGE
+        self.image_w = None         # Image width
         self.bridge = CvBridge()
 
-        # MODELLO
+        # MODEL
         self.model = None
+        self.class_names = None
 
-        # CONTROLLO MOVIMENTO
+        # MOVEMENT CONTROL
         self.rate_hz = 20
-        self.forward_speed = 0.4        # Velocità lineare
-        self.align_tol = 0.03           # Errore tollerato in fase di riallineamento
+        self.forward_speed = 0.4        # Linear speed
+        self.align_tol = 0.03           # Error tolerance for realignment
 
-        # VARIABILE DI STATO
+        # NAVIGATION FLAGS
         self.scanning = False
         self.analyzing = False
-        self.stopped = False    # Flag to stop forever the robot
+        self.stopped = False            # Permanent stop flag
 
-        # ODOMETRIA
-        # Odometria corrente
+        # ODOMETRY
+        # Current odometry
         self.x = None
         self.y = None
         self.yaw = None
 
-        # Odometria di partenza
+        # Initial odometry
         self.starting_x = None
         self.starting_y = None
         self.starting_yaw = None
 
-        # SEARCH E SCAN
-        self.search_straight_distance = 1 # Distanza in rettilineo da percorrere in fase "FORWARD"
+        # SEARCH AND SCAN DATA
+        self.search_straight_distance = 1.0 # Straight distance to travel during movement phase
 
-        # Odometria di partenza per la fase di ricerca
+        # Reference coordinates for search
         self.search_start_x = None
         self.search_start_y = None
         self.search_start_yaw = None
 
-        # Variabili di stato per la fase di "SCAN"
+        # Control variables for the panoramic sweep
         self.turning_right = True
         self.turning_left = False
         self.realigning = False
@@ -74,21 +73,16 @@ class VisionDetectionNode(Node):
         self.right_target_yaw = None
         self.left_target_yaw = None
         self.realigning_target_yaw = None
+        self.start_spinning_yaw = None
 
-        # Variabile di stato che indica se una pianta malata è stata identificata
-        self.ill_plant_detected = False
+        # Detection flags for plant health
         self.ill_plant_detected_left = False
         self.ill_plant_detected_right = False
 
-        # RILEVAMENTO OSTACOLI
-        self.ranges = []
+        # Percentage threshold to detect ill plants
+        self.color_threshold = 10   # 10%
 
-        self.obstacle_detected = False
-        self.avoiding_dir = 1   # Sinistra di default
-        self.avoiding = False
-        self.aligning = False
-
-        # Coordinates of Final Position
+        # Final Goal Coordinates
         self.goal_x = -1.975
         self.goal_y = -0.025
 
@@ -101,44 +95,42 @@ class VisionDetectionNode(Node):
             depth=10
         )
 
-        self.odom_sub = self.create_subscription(Odometry, "/odom", self.odom_callback, qos)    # Riceve odometria
-        self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)     # Riceve le immagini della camera
-        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)                             # Invia le velocità
-        self.pub_image = self.create_publisher(Image, "/yolo/annotated_image", 10)              # Pubblica le immagini annotate con bounding box
+        self.odom_sub = self.create_subscription(Odometry, "/odom", self.odom_callback, qos)
+        self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)
+        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)
+        self.pub_image = self.create_publisher(Image, "/yolo/annotated_image", 10)
 
-        self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)           # Ciclo di controllo principale
+        # Main execution loop timer
+        self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)
 
         self.load_model()
-        self.get_logger().info(f"Node loaded...")
+        self.get_logger().info("Node initialized and SVM model loading...")
 
     # -----------------------------
-    # CARICAMENTO MODELLO SVM
+    # MODEL LOADING
     # -----------------------------
     def load_model(self):
         """
-        Carica il modello SVM e le etichette delle classi dai file joblib.
-
-        Inizializza:
-            self.model: Il classificatore caricato.
-            self.class_names: Le etichette associate al modello.
+        Loads the SVM model and class labels from joblib files.
+        Accesses local assets to prepare for inference.
         """
-        
-
-
-        # Espande il simbolo '~' o recupera automaticamente /home/nome_utente
         home = os.path.expanduser("~")
         model_path = os.path.join(home, "Agritech/workspace/assets/leaf_svm_model.joblib")
         labels_path = os.path.join(home, "Agritech/workspace/assets/leaf_labels.joblib")
 
-        t0 = time.time()
-        self.model = joblib.load(model_path)
-        self.class_names = joblib.load(labels_path)
-        self.get_logger().info(f"Loaded SVM model in {time.time() - t0:.2f}s")
+        try:
+            t0 = time.time()
+            self.model = joblib.load(model_path)
+            self.class_names = joblib.load(labels_path)
+            self.get_logger().info(f"Loaded SVM model in {time.time() - t0:.2f}s")
+        except Exception as e:
+            self.get_logger().error(f"Failed to load model: {e}")
 
     # -----------------------------
-    # CALLBACK PER ODOMETRIA
+    # ODOMETRY CALLBACK
     # -----------------------------
     def odom_callback(self, msg: Odometry):
+        """Updates the robot's current pose based on sensor feedback."""
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
@@ -148,397 +140,271 @@ class VisionDetectionNode(Node):
             self.starting_x = self.x
             self.starting_y = self.y
             self.starting_yaw = self.yaw
-            self.get_logger().info("Odom initialized")
+            self.get_logger().info("Initial odometry coordinates captured.")
 
     # -----------------------------
-    # CALLBACK PER CAMERA
+    # CAMERA CALLBACK
     # -----------------------------
     def on_image(self, msg: Image):
         """
-        Callback per l'elaborazione delle immagini.
-
-        Converte il messaggio ROS in OpenCV, gestisce il salvataggio dei frame ai 
-        checkpoint e analizza la presenza di pixel "verde chiaro" per il 
-        rilevamento di piante potenzialmente malate.
-
-        Args:
-            msg (Image): Messaggio immagine ricevuto dal sensore.
+        Processes incoming camera frames to monitor specific color ranges.
+        
+        During the panoramic sweep, it checks for a high ratio of "light green" pixels.
+        High ratios indicate a potential 'ill' plant in the robot's current field of view.
         """
-
-        # Converte da ROS a OpenCV
         try:
             img_bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception as e:
             self.get_logger().warn(f"cv_bridge failed: {e}")
             return
 
-        # Estrae il canali BGR
+        # Isolate color channels
         blue_channel = img_bgr[:, :, 0]
         green_channel = img_bgr[:, :, 1]
         red_channel = img_bgr[:, :, 2]
 
-        # Applica la condizione per trovare verde chiaro (piante potenzialmente malate)
+        # Filter for symptomatic leaf color ranges
         condition = (green_channel > 80) & (green_channel < 190) & \
                     (red_channel < 110) & (red_channel > 50) & \
                     (blue_channel < 70)
 
         light_green_count = np.count_nonzero(condition)
-
-        # Calcola la percentuale
         total_pixels = img_bgr.shape[0] * img_bgr.shape[1]
         percentage = (light_green_count / total_pixels) * 100
 
-        if percentage > 0.5:
-            self.get_logger().warn(f"WARNING: Light green detection high! Ratio: {percentage:.2f}%")
-
+        # Flag detection if the specific color ratio exceeds threshold
+        if percentage > self.color_threshold:
             if self.scanning:
-
                 if self.turning_right:
                     self.ill_plant_detected_right = True
-                
                 if self.turning_left:
                     self.ill_plant_detected_left = True
 
-        h, w = img_bgr.shape[:2]
-
         if self.image_w is None:
-            self.image_w = w
-
-        return
+            self.image_w = img_bgr.shape[1]
 
     # -----------------------------
-    # METODI DI CONTROLLO
+    # UTILITY METHODS
     # -----------------------------
-    def count_ill_pixels(self, img_bgr):
-        """
-        Conta i pixel che rientrano nel range cromatico del "verde malato" 
-        tramite filtraggio dei canali BGR.
-
-        Returns:
-            int: Numero di pixel rilevati.
-        """
-        
-        # Estrae i canali RBG
-        red_channel = img_bgr[:, :, 2]
-        blue_channel = img_bgr[:, :, 0]
-        green_channel = img_bgr[:, :, 1]
-
-        # Condizione per identificare il verde malato
-        condition = (green_channel > 80) & (green_channel < 190) & \
-                    (red_channel < 110) & (red_channel > 50) & \
-                    (blue_channel < 70)
-
-        # Conta quanti pixel nell'immagine sono verde malato
-        light_green_count = np.count_nonzero(condition)
-
-        return light_green_count
-
     def distance_from_point(self, x0: float, y0: float) -> float:
-        """
-        Calcola la distanza euclidea dalla posizione corrente (self.x, self.y)
-        a un punto dato (x0, y0).
-        """
+        """Calculates Euclidean distance to target coordinates."""
         return math.hypot(self.x - x0, self.y - y0)
     
     def quaternion_to_yaw(self, qx: float, qy: float, qz: float, qw: float) -> float:
-        """
-        Calcola l'imbardata (yaw) da un quaternione.
-        """
+        """Translates orientation data into a yaw angle (radians)."""
         siny = 2.0 * (qw * qz + qx * qy)
         cosy = 1.0 - 2.0 * (qy*qy + qz*qz)
         return math.atan2(siny, cosy)
 
     def normalize_angle(self, angle: float) -> float:
-        """
-        Normalizza un angolo all'intervallo [-pi, pi).
-        """
+        """Ensures an angle remains within the [-pi, pi) boundary."""
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
     def angle_error(self, target_angle: float) -> float:
-        """
-        Calcola l'errore angolare normalizzato tra l'angolo target e lo yaw corrente.
-        """
+        """Measures the difference between a target heading and current yaw."""
         return self.normalize_angle(target_angle - self.yaw)
 
     def calculate_target_yaw(self, goal_x: float, goal_y: float) -> float:
-        """
-        Calcola l'angolo di imbardata (yaw) necessario per puntare verso il goal.
-        """
+        """Determines the heading required to reach the final destination."""
         return math.atan2(goal_y - self.y, goal_x - self.x)
     
     def publish_twist(self, linear=0.0, angular=0.0):
-        """
-        Pubblica un comando di velocità lineare e angolare sul topic /cmd_vel.
-
-        Args:
-            linear (float): Velocità lineare in X (m/s).
-            angular (float): Velocità angolare in Z (rad/s).
-        """
+        """Sends movement commands to the robot base."""
         msg = Twist()
         msg.linear.x = float(linear)
         msg.angular.z = float(angular)
         self.cmd_pub.publish(msg)
 
     def publish_stop(self):
-        """Pubblica un comando di velocità nullo (arresto del robot)."""
+        """Halts all robot movement."""
         self.publish_twist(0.0, 0.0)
 
-    def print_message(self, message):
-        self.get_logger().info(message)
-
-
     # -----------------------------
-    # METODI DI STATO
+    # TASK METHODS (SCAN & ANALYZE)
     # -----------------------------
     def scan(self):
         """
-        Esegue una manovra di scansione angolare sul posto per cercare il target.
+        Executes a panoramic sweep to look for targets.
         
-        La logica segue una sequenza di tre fasi:
-        1. ROTAZIONE A DESTRA: Ruota il robot di 45 gradi verso destra rispetto 
-           all'orientamento iniziale.
-        2. ROTAZIONE A SINISTRA: Una volta completata la destra, ruota fino a 
-           45 gradi a sinistra rispetto all'orientamento di partenza (arco totale di 90°).
-        3. RIALLINEAMENTO: Torna all'orientamento originale memorizzato all'inizio 
-           della scansione.
+        Logic sequence:
+        1. RIGHT SWEEP: Rotates 45 degrees right from start heading.
+        2. LEFT SWEEP: Rotates across to 45 degrees left (90° total arc).
+        3. REALIGNMENT: Aligns heading back towards the goal.
         
-        Al termine del riallineamento, lo stato viene impostato su "FORWARD" per 
-           proseguire l'esplorazione in linea retta se nessuna pianta potenzialmente malata
-           è stata identificata; altrimenti, lo stato viene impostato su "ANALYZE" per
-           analizzare un campione raccolto della pianta in questione.
+        If a target was flagged during the sweep, the robot proceeds to classification.
         """
-        # Controllo di sicurezza: se lo stato interno non è SCAN -> ritorna immediatamente
         if not self.scanning:
             return
 
-        # Gira a destra
+        # Phase 1: Rotating Right
         if self.turning_right:
-
             if self.right_target_yaw is None:
-                self.start_spinning_yaw = self.yaw  # Salva l'orientamento corrente per il successivo riallineamento
-                self.right_target_yaw = self.yaw - math.pi / 4
+                self.start_spinning_yaw = self.yaw
+                self.right_target_yaw = self.normalize_angle(self.yaw - math.pi / 4)
 
-            # Se ha raggiunto l'ampiezza desiderata, smette di ruotare
             if abs(self.angle_error(self.right_target_yaw)) < self.align_tol:
                 self.publish_stop()
-
-                # Aggiorna le variabili interne
                 self.right_target_yaw = None
                 self.turning_left = True
                 self.turning_right = False
-
                 return
             
-            # Altrimenti, ruota verso DESTRA
             self.publish_twist(0.0, -0.5)
-
             return
         
-        # Gira a sinistra
+        # Phase 2: Rotating Left
         if self.turning_left:
-
             if self.left_target_yaw is None:
-                self.left_target_yaw = self.start_spinning_yaw + math.pi / 4
+                self.left_target_yaw = self.normalize_angle(self.start_spinning_yaw + math.pi / 4)
 
-            # Se ha raggiunto l'ampiezza desiderata, smette di ruotare
             if abs(self.angle_error(self.left_target_yaw)) < 0.05:
                 self.publish_stop()
                 self.left_target_yaw = None
                 self.realigning = True
                 self.turning_left = False
-
                 return
             
-            # Altrimenti, ruota verso SINISTRA
             self.publish_twist(0.0, 0.5)
             return
         
-        # Riallineamento a orientamento di partenza
+        # Phase 3: Goal Alignment
         if self.realigning:
-            
-            # Salva orientamento di partenza per la fase di riallineamento
-            if self.realigning_target_yaw is None:
-                self.realigning_target_yaw = self.start_spinning_yaw
-
-            # Se ha completato il riallineamento: smette di ruotare e torna allo stato FORWARD
             target_yaw = self.calculate_target_yaw(self.goal_x, self.goal_y)
             angle_err = self.angle_error(target_yaw)
+
             if abs(angle_err) < self.align_tol:
                 self.publish_stop()
-                self.realigning_target_yaw = None
                 self.realigning = False
+                self.scanning = False
 
-                # A questo punto il robot è orientato correttamente
-                # Se sono state rilevate piante malate durante la scansione, analizza un campione delle foglie
+                # Check if analysis is required based on vision flags
                 if self.ill_plant_detected_left or self.ill_plant_detected_right:
                     self.ill_plant_detected_left = False
                     self.ill_plant_detected_right = False
-
-                    self.scanning = False
                     self.analyzing = True
-
-                    return
-
-                # Altrimenti procede dritto
-                # Resetta le variabili relative allo stato FORWARD
-                self.search_start_x = None
-                self.search_start_y = None
-                self.search_start_yaw = None
-
-                self.scanning = False
-
+                else:
+                    self.search_start_x = None
                 return
             
-            # Altrimenti, gira a destra
             angular_vel = max(min(0.8 * angle_err, self.turn_speed_max), -self.turn_speed_max)
             self.publish_twist(0.0, angular_vel)
-            return
-
-        return
 
     def analyze(self):
         """
-        Esegue l'analisi della pianta tramite classificazione SVM.
-
-        Seleziona casualmente un'immagine dalla directory dati (70% Blight, 30% Healthy),
-        estrae le feature HOG e utilizza il modello SVM per l'inferenza.
-        Pubblica il risultato visuale e ripristina lo stato FORWARD.
+        Performs target classification using vision models.
+        
+        1. Selects a sample image from the database.
+        2. Generates HOG features for the visual sample.
+        3. Runs inference via the SVM classifier.
+        4. Publishes a visual report to the annotated image topic.
         """
         self.publish_stop()
 
-        # Configurazione percorsi e parametri
         IMG_SIZE = (128, 128)
         home = os.path.expanduser("~")
         base_path = os.path.join(home, "Agritech/workspace/Data/Original Data/")
 
-        # 1. Selezione della cartella con probabilità pesata
-        subfolder = random.choices(
-            ["Leaf Blight", "Healthy"], 
-            weights=[0.7, 0.3], 
-            k=1
-        )[0]
-        
+        # Random sample selection (probabilistic weighting)
+        subfolder = random.choices(["Leaf Blight", "Healthy"], weights=[0.7, 0.3], k=1)[0]
         folder_path = os.path.join(base_path, subfolder)
 
-        # 2. Selezione di un'immagine randomica nella cartella scelta
         try:
             files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-            if not files:
-                raise FileNotFoundError(f"Nessun file immagine trovato in {folder_path}")
+            if not files: raise FileNotFoundError("No images found.")
             
             img_path = os.path.join(folder_path, random.choice(files))
             img = cv2.imread(img_path)
-            
-            if img is None:
-                raise ValueError(f"Impossibile leggere l'immagine: {img_path}")
-
+            if img is None: raise ValueError("Invalid image.")
         except Exception as e:
-            self.get_logger().error(f"Errore caricamento immagine: {e}")
-
-            # Reset variabili di stato e ripresa navigazione
-            self.search_start_x = self.search_start_y = self.search_start_yaw = None
+            self.get_logger().error(f"Sample error: {e}")
             self.analyzing = False
+            self.search_start_x = None
             return
 
-        # Elaborazione immagine
+        # Pre-processing and Feature Generation
         display_img = img.copy() 
         img_resized = cv2.resize(img, IMG_SIZE)
         gray = cv2.cvtColor(img_resized, cv2.COLOR_BGR2GRAY)
 
-        # Inference HOG + SVM
+        # Compute HOG features
         hog = cv2.HOGDescriptor((128,128), (32,32), (16,16), (16,16), 9)
         features = hog.compute(gray).flatten().reshape(1, -1)
         
+        # Classifier Inference
         pred_idx = self.model.predict(features)[0]
         prob = self.model.predict_proba(features).max()
         label = self.class_names[pred_idx]
 
-        # Overlay grafico dei risultati
+        # Report Generation
         text = f"{label} ({prob*100:.1f}%)"
-        cv2.putText(display_img, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 
-                    1.0, (0, 255, 0), 2, cv2.LINE_AA)
-
-        # Pubblicazione immagine annotata
-        # Convert BGR to RGB
+        cv2.putText(display_img, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+        
         img_rgb = cv2.cvtColor(display_img, cv2.COLOR_BGR2RGB)
-
         try:
-            # Use "rgb8" encoding
             annotated_msg = self.bridge.cv2_to_imgmsg(img_rgb, encoding="rgb8")
             self.pub_image.publish(annotated_msg)
-            self.get_logger().info(f"Analisi completata: {text}")
+            self.get_logger().info(f"Analysis complete: {text}")
         except Exception as e:
-            self.get_logger().error(f"Errore pubblicazione immagine: {e}")
+            self.get_logger().error(f"Publish error: {e}")
 
-        # Reset variabili di stato e ripresa navigazione
-        self.search_start_x = self.search_start_y = self.search_start_yaw = None
+        # Transition to next movement segment
+        self.search_start_x = None
         self.analyzing = False
 
     # -----------------------------
-    # CONTROL LOOP
+    # MAIN EXECUTION LOOP
     # -----------------------------
     def control_loop(self):
         """
-        Ciclo di controllo principale del robot (FSM).
-
-        Gestisce le transizioni di stato basandosi sulla posizione (checkpoint), 
-        sulla sicurezza (evitamento ostacoli) e sulla logica di missione. Coordina 
-        l'esecuzione dei comportamenti di navigazione, scansione e analisi.
+        Main logic loop running at a fixed frequency.
+        
+        Coordinates the sequence of behaviors:
+        1. Halt if the final goal is reached.
+        2. Perform panoramic sweep if triggered.
+        3. Run classification tasks if targets were found.
+        4. Move straight for defined intervals when searching.
         """
-
         if self.x is None or self.yaw is None or self.stopped:
             self.publish_stop()
             return
-        
 
-        # Compute distance to final position
-        d = self.distance_from_point(self.goal_x, self.goal_y)
-
-        if d <= 0.1:
+        # Final destination check
+        dist_to_goal = self.distance_from_point(self.goal_x, self.goal_y)
+        if dist_to_goal <= 0.1:
+            self.get_logger().info("Goal reached. Stopping.")
             self.publish_stop()
             self.stopped = True
             return
 
-
+        # Decision Logic
         if self.scanning:
             self.scan()
         elif self.analyzing:
             self.analyze()
         else:
-
-            # Salva odometria di partenza  
+            # Movement segment initialization
             if self.search_start_x is None:
-                self.search_start_y = self.y
-                self.search_start_yaw = self.yaw
                 self.search_start_x = self.x
+                self.search_start_y = self.y
 
-            # Avanza per la distanza indicata, poi passa allo stato "SCAN"
-            d = self.distance_from_point(self.search_start_x, self.search_start_y)
-
-            if d >= self.search_straight_distance:
+            # Evaluate distance traveled in current segment
+            traveled_dist = self.distance_from_point(self.search_start_x, self.search_start_y)
+            if traveled_dist >= self.search_straight_distance:
                 self.publish_stop()
-
-                # Resetta i parametri di scansione 
+                
+                # Trigger panoramic sweep
                 self.turning_right = True
                 self.turning_left = False
                 self.realigning = False
-
                 self.right_target_yaw = None
                 self.left_target_yaw = None
-                self.realigning_target_yaw = None
-
-                # Resetta i parametri di stato
-                self.search_start_x = None
-                self.search_start_y = None
-                self.search_start_yaw = None
-
                 self.scanning = True
-
-            # Altrimenti, prosegue dritto
-            self.publish_twist(self.forward_speed, 0.0)
+            else:
+                # Continue forward motion
+                self.publish_twist(self.forward_speed, 0.0)
 
 # -----------------------------
-# MAIN
+# EXECUTION
 # -----------------------------
 def main():
     rclpy.init()

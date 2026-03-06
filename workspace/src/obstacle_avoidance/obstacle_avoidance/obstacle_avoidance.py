@@ -13,7 +13,6 @@ from nav_msgs.msg import Odometry                                               
 from geometry_msgs.msg import Twist                                              # type: ignore
 from cv_bridge import CvBridge                                                   # type: ignore
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy         # type: ignore
-import cv2
 import random
 
 
@@ -21,58 +20,58 @@ class ObstacleAvoidance(Node):
     def __init__(self):
         super().__init__("limo_yolo")
 
-        # PARAMETRI ROS
+        # ROS PARAMETERS
         self.declare_parameter("image_topic", "/image")
-        self.declare_parameter("turn_speed_max", 1.5)           # Velocità angolare massima
+        self.declare_parameter("turn_speed_max", 1.5)           # Maximum angular velocity
 
         self.img_topic = self.get_parameter("image_topic").value
         self.turn_speed_max = self.get_parameter("turn_speed_max").value
 
-        # CAMERA E IMMAGINE
+        # CAMERA AND IMAGE
         self.bridge = CvBridge()
 
-        # CONTROLLO MOVIMENTO
+        # MOVEMENT CONTROL
         self.rate_hz = 20
-        self.forward_speed = 0.4        # Velocità lineare
-        self.align_tol = 0.05           # Errore tollerato in fase di riallineamento
+        self.forward_speed = 0.4        # Linear speed
+        self.align_tol = 0.05           # Error tolerance during realignment phase
 
-        # ODOMETRIA
-        # Odometria corrente
+        # ODOMETRY
+        # Current odometry
         self.x = None
         self.y = None
         self.yaw = None
 
-        # Odometria di partenza
+        # Initial odometry
         self.starting_x = None
         self.starting_y = None
         self.starting_yaw = None
 
-        # SEARCH E SCAN
-        self.search_straight_distance = 1 # Distanza in rettilineo da percorrere in fase "FORWARD"
+        # SEARCH AND SCAN
+        self.search_straight_distance = 1 # Straight distance to travel during "FORWARD" phase
 
-        # Odometria di partenza per la fase di ricerca
+        # Starting odometry for the search phase
         self.search_start_x = None
         self.search_start_y = None
         self.search_start_yaw = None
 
         self.realigning = False
 
-        # RILEVAMENTO OSTACOLI
+        # OBSTACLE DETECTION
         self.ranges = []
 
         self.obstacle_detected = False
         self.avoiding = False
 
-        self.obstacle_threshold = 0.4   # Distanza di sicurezza a cui evitare un ostacolo
-        self.current_distance = np.inf  # Distanza corrente da eventuali ostacoli
+        self.obstacle_threshold = 0.4   # Safety distance threshold to trigger avoidance
+        self.current_distance = np.inf  # Current distance from any obstacles
 
-        # Odometria di partenza in fase di evitamento ostacolo
+        # Starting odometry for obstacle avoidance phase
         self.start_avoiding_yaw = None
 
-        # Logica di stop
+        # Stop logic
         self.stopped = False
 
-        # Variabili relative ai checkpoint (bivi)
+        # Variables related to checkpoints (intersections)
         self.current_checkpoint = None
 
         self.checkpoint1_reached = False
@@ -86,7 +85,7 @@ class ObstacleAvoidance(Node):
 
         self.checkpoint4_reached = False
 
-        # Coordinate dei checkpoint
+        # Checkpoint coordinates
         self.checkpoint1_x = 0.650
         self.checkpoint1_y = -2.000
         self.checkpoint2_x = 0.650
@@ -94,7 +93,7 @@ class ObstacleAvoidance(Node):
         self.checkpoint3_x = -1.825
         self.checkpoint3_y = 0.525
 
-        # Ultimo checkpoint -> posizione finale
+        # Last checkpoint -> final position
         self.checkpoint4_x = -1.825
         self.checkpoint4_y = -2.000
 
@@ -107,20 +106,21 @@ class ObstacleAvoidance(Node):
             depth=10
         )
 
-        self.odom_sub = self.create_subscription(Odometry, "/odom", self.odom_callback, qos)    # Riceve odometria
-        self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)     # Riceve le immagini della camera
-        self.sub_scan = self.create_subscription(LaserScan, "/scan", self.on_scan, 10)          # Riceve il LIDAR
-        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)                             # Invia le velocità
+        self.odom_sub = self.create_subscription(Odometry, "/odom", self.odom_callback, qos)    # Receives odometry
+        self.sub_image = self.create_subscription(Image, self.img_topic, self.on_image, 10)     # Receives camera images
+        self.sub_scan = self.create_subscription(LaserScan, "/scan", self.on_scan, 10)          # Receives LiDAR data
+        self.cmd_pub = self.create_publisher(Twist, "/cmd_vel", 10)                             # Sends velocity commands
 
-        self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)           # Ciclo di controllo principale
+        self.control_timer = self.create_timer(1.0 / self.rate_hz, self.control_loop)           # Main control loop
 
         self.get_logger().info(f"Node loaded...")
 
 
     # -----------------------------
-    # CALLBACK PER ODOMETRIA
+    # ODOMETRY CALLBACK
     # -----------------------------
     def odom_callback(self, msg: Odometry):
+        """Updates internal pose variables from Odometry messages."""
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         q = msg.pose.pose.orientation
@@ -133,25 +133,27 @@ class ObstacleAvoidance(Node):
             self.get_logger().info("Odom initialized")
 
     # -----------------------------
-    # CALLBACK PER CAMERA
+    # CAMERA CALLBACK
     # -----------------------------
     def on_image(self, msg: Image):
+        """Placeholder for camera image processing."""
         return
 
 
     # -----------------------------
-    # CALLBACK PER LIDAR
+    # LiDAR CALLBACK
     # -----------------------------
     def on_scan(self, msg: LaserScan):
         """
-        Callback per i dati LiDAR. Aggiorna la distanza minima frontale 
-        considerando un settore centrale di 40 campioni.
+        LiDAR data callback. Updates the minimum frontal distance 
+        by considering a central sector of 40 samples.
         """
 
         self.ranges = np.array(msg.ranges)
 
         n = len(self.ranges)
         center = n // 2
+        # Define a window of 20 samples to the left and 20 to the right of the center
         left = max(center - 20, 0)
         right = min(center + 20, n)
         if left < right:
@@ -160,18 +162,18 @@ class ObstacleAvoidance(Node):
             self.current_distance = np.nanmin(self.ranges)
 
     # -----------------------------
-    # METODI DI CONTROLLO
+    # CONTROL METHODS
     # -----------------------------
     def distance_from_point(self, x0: float, y0: float) -> float:
         """
-        Calcola la distanza euclidea dalla posizione corrente (self.x, self.y)
-        a un punto dato (x0, y0).
+        Calculates the Euclidean distance from the current position (self.x, self.y)
+        to a given point (x0, y0).
         """
         return math.hypot(self.x - x0, self.y - y0)
     
     def quaternion_to_yaw(self, qx: float, qy: float, qz: float, qw: float) -> float:
         """
-        Calcola l'imbardata (yaw) da un quaternione.
+        Calculates the yaw (heading) from a quaternion.
         """
         siny = 2.0 * (qw * qz + qx * qy)
         cosy = 1.0 - 2.0 * (qy*qy + qz*qz)
@@ -179,29 +181,29 @@ class ObstacleAvoidance(Node):
 
     def normalize_angle(self, angle: float) -> float:
         """
-        Normalizza un angolo all'intervallo [-pi, pi).
+        Normalizes an angle to the interval [-pi, pi).
         """
         return (angle + math.pi) % (2 * math.pi) - math.pi
 
     def angle_error(self, target_angle: float) -> float:
         """
-        Calcola l'errore angolare normalizzato tra l'angolo target e lo yaw corrente.
+        Calculates the normalized angular error between the target angle and current yaw.
         """
         return self.normalize_angle(target_angle - self.yaw)
 
     def calculate_target_yaw(self, goal_x: float, goal_y: float) -> float:
         """
-        Calcola l'angolo di imbardata (yaw) necessario per puntare verso il goal.
+        Calculates the yaw angle required to point toward the goal.
         """
         return math.atan2(goal_y - self.y, goal_x - self.x)
     
     def publish_twist(self, linear=0.0, angular=0.0):
         """
-        Pubblica un comando di velocità lineare e angolare sul topic /cmd_vel.
+        Publishes a linear and angular velocity command to the /cmd_vel topic.
 
         Args:
-            linear (float): Velocità lineare in X (m/s).
-            angular (float): Velocità angolare in Z (rad/s).
+            linear (float): Linear velocity in X (m/s).
+            angular (float): Angular velocity in Z (rad/s).
         """
         msg = Twist()
         msg.linear.x = float(linear)
@@ -209,7 +211,7 @@ class ObstacleAvoidance(Node):
         self.cmd_pub.publish(msg)
 
     def publish_stop(self):
-        """Pubblica un comando di velocità nullo (arresto del robot)."""
+        """Publishes a zero velocity command (stops the robot)."""
         self.publish_twist(0.0, 0.0)
 
     def print_message(self, message):
@@ -217,25 +219,28 @@ class ObstacleAvoidance(Node):
         
 
     # -----------------------------
-    # RILEVAMENTO OSTACOLI
+    # OBSTACLE DETECTION
     # -----------------------------
     def detect_obstacle(self):
         """
-        Verifica la presenza di ostacoli.
+        Checks for the presence of obstacles.
 
-        Prioritizza l'evitamento: un ostacolo è rilevato se la distanza LiDAR
-        frontale è inferiore alla soglia.
+        Prioritizes avoidance: an obstacle is detected if the frontal LiDAR distance
+        is below the threshold.
         """
  
-        # Rileva un ostacolo generico se la distanza LiDAR frontale è troppo piccola.
+        # Detects a generic obstacle if frontal LiDAR distance is too short.
         self.obstacle_detected = self.current_distance < self.obstacle_threshold
 
 
     def align_to_next_checkpoint(self):
+        """
+        Determines the next checkpoint and rotates the robot to face it.
+        """
         goal_x = None
         goal_y = None
 
-        # Determina la posizione del checkpoint a cui allinearsi (il successivo rispetto a quello raggiunto)
+        # Determine the position of the checkpoint to align to (the one following the reached one)
         if self.current_checkpoint is None:
             goal_x = self.checkpoint1_x
             goal_y = self.checkpoint1_y
@@ -249,12 +254,12 @@ class ObstacleAvoidance(Node):
             goal_x = self.checkpoint4_x
             goal_y = self.checkpoint4_y
 
-        # Si allinea al prossimo checkpoint
+        # Align with the next checkpoint
         target_yaw = self.calculate_target_yaw(goal_x, goal_y)
         angle_err = self.angle_error(target_yaw)
             
         if abs(angle_err) > self.align_tol:
-            # Ruota con controllo proporzionale
+            # Rotate using proportional control
             angular_vel = max(min(0.8 * angle_err, self.turn_speed_max), -self.turn_speed_max)
             self.publish_twist(0.0, angular_vel)
         else:
@@ -263,11 +268,14 @@ class ObstacleAvoidance(Node):
         return    
 
     def check_for_checkpoint_reached(self):
+        """
+        Checks if the robot has reached the proximity of any checkpoint
+        and updates the mission progress.
+        """
 
         # CHECKPOINT_1
         if not self.checkpoint1_reached and not self.checkpoint1_finished:
             d = self.distance_from_point(self.checkpoint1_x, self.checkpoint1_y)
-            #print(d)
             if d <= 0.1:
                 self.checkpoint1_reached = True
                 self.checkpoint1_finished = True
@@ -277,7 +285,6 @@ class ObstacleAvoidance(Node):
         # CHECKPOINT_2
         if not self.checkpoint2_reached and not self.checkpoint2_finished:
             d = self.distance_from_point(self.checkpoint2_x, self.checkpoint2_y)
-            #print(d)
             if d <= 0.1:
                 self.checkpoint2_reached = True
                 self.checkpoint2_finished = True
@@ -287,7 +294,6 @@ class ObstacleAvoidance(Node):
         # CHECKPOINT_3
         if not self.checkpoint3_reached and not self.checkpoint3_finished:
             d = self.distance_from_point(self.checkpoint3_x, self.checkpoint3_y)
-            #print(d)
             if d <= 0.1:
                 if self.checkpoint4_reached:
                     self.stopped = True     # End of the task
@@ -303,7 +309,6 @@ class ObstacleAvoidance(Node):
         # CHECKPOINT_4
         if not self.checkpoint4_reached:
             d = self.distance_from_point(self.checkpoint4_x, self.checkpoint4_y)
-            #print(d)
             if d <= 0.1:
                 self.checkpoint4_reached = True
 
@@ -315,9 +320,13 @@ class ObstacleAvoidance(Node):
 
 
     # -----------------------------
-    # METODI DI STATO
+    # ACTION METHODS
     # -----------------------------
     def avoid(self):
+        """
+        Executes an obstacle avoidance maneuver by checking alternative paths.
+        Rotates to look left, then right, then backward until a clear path is found.
+        """
         # 1. Initialize Avoidance
         if self.start_avoiding_yaw is None:
             self.start_avoiding_yaw = self.yaw
@@ -348,7 +357,7 @@ class ObstacleAvoidance(Node):
         self.publish_stop()
         
         if not self.obstacle_detected:
-            # PATH CLEAR: Exit avoidance and go forward
+            # PATH CLEAR: Exit avoidance and begin realignment
             self.start_avoiding_yaw = None
             self.avoid_target_yaw = None
             self.avoiding = False
@@ -360,7 +369,7 @@ class ObstacleAvoidance(Node):
             self.avoid_step += 1
             self.avoid_target_yaw = None
             
-            # If we've finished looking back, we just stop or force a move
+            # If we've finished looking back and all are blocked, stop the robot
             if self.avoid_step > 2:
                 self.stopped = True
 
@@ -369,11 +378,11 @@ class ObstacleAvoidance(Node):
     # -----------------------------
     def control_loop(self):
         """
-        Ciclo di controllo principale del robot (FSM).
+        Main control loop of the robot.
 
-        Gestisce le transizioni di stato basandosi sulla posizione (checkpoint), 
-        sulla sicurezza (evitamento ostacoli) e sulla logica di missione. Coordina 
-        l'esecuzione dei comportamenti di navigazione, scansione e analisi.
+        Manages transitions based on position (checkpoints), 
+        safety (obstacle avoidance), and mission logic. Coordinates 
+        the execution of navigation and avoidance behaviors.
         """
 
         if self.x is None or self.yaw is None or self.stopped:
@@ -386,7 +395,7 @@ class ObstacleAvoidance(Node):
         # Check if any obstacle is in front
         self.detect_obstacle()
 
-        # If an obstacle is in front and the agent is not avoiding an obstacle already, it should avoid it
+        # If an obstacle is in front and the agent is not avoiding an obstacle already, start avoidance
         if self.obstacle_detected and not self.avoiding:
             self.avoiding = True
             
@@ -399,7 +408,7 @@ class ObstacleAvoidance(Node):
             
             if not self.realigning:
 
-                # Save current odometry
+                # Save starting odometry for the current segment
                 if self.search_start_x is None:
                     self.search_start_y = self.y
                     self.search_start_yaw = self.yaw
@@ -411,7 +420,7 @@ class ObstacleAvoidance(Node):
                 if d >= self.search_straight_distance:
                     self.publish_stop()
 
-                    # Reset parameters for current phase
+                    # Reset parameters for current segment
                     self.search_start_x = None
                     self.search_start_y = None
                     self.search_start_yaw = None
@@ -420,11 +429,11 @@ class ObstacleAvoidance(Node):
 
                     return
 
-                # Altrimenti, prosegue dritto
+                # Otherwise, continue straight
                 self.publish_twist(self.forward_speed, 0.0)
             
             else:
-                # Align to next checkpoint (safety constraint)
+                # Align to next checkpoint (safety constraint/path following)
                 self.align_to_next_checkpoint()
 
                 return

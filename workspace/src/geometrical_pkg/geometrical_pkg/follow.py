@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Nodo ROS 2 per pilotare un robot mobile (ad esempio un TurtleBot3)
-per seguire percorsi predefiniti come un quadrato, un poligono o un cerchio,
-utilizzando il feedback di odometria.
+ROS 2 Node to drive a mobile robot (e.g., TurtleBot3)
+to follow predefined paths such as a square, a polygon, or a circle,
+using odometry feedback.
 """
 import rclpy                                                                # type: ignore
 from rclpy.node import Node                                                 # type: ignore
@@ -16,20 +16,20 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy    # ty
 
 
 # -------------------------------------------------------------------
-# Funzioni di supporto
+# Helper Functions
 # -------------------------------------------------------------------
 def quaternion_to_yaw(qx, qy, qz, qw):
     """
-    Calcola l'imbardata (rotazione attorno a Z) da un quaternione.
+    Calculates the yaw (rotation around Z) from a quaternion.
 
     Args:
-        qx (float): Componente X del quaternione.
-        qy (float (float): Componente Y del quaternione.
-        qz (float): Componente Z del quaternione.
-        qw (float): Componente W del quaternione.
+        qx (float): X component of the quaternion.
+        qy (float): Y component of the quaternion.
+        qz (float): Z component of the quaternion.
+        qw (float): W component of the quaternion.
 
     Returns:
-        float: Angolo di imbardata in radianti.
+        float: Yaw angle in radians.
     """
     siny_cosp = 2.0 * (qw * qz + qx * qy)
     cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
@@ -37,31 +37,31 @@ def quaternion_to_yaw(qx, qy, qz, qw):
 
 def normalize_angle(angle):
     """
-    Normalizza un angolo all'intervallo [-pi, pi).
+    Normalizes an angle to the range [-pi, pi).
 
     Args:
-        angle (float): L'angolo in radianti.
+        angle (float): The angle in radians.
 
     Returns:
-        float: L'angolo normalizzato in radianti.
+        float: The normalized angle in radians.
     """
     return (angle + math.pi) % (2 * math.pi) - math.pi
 
 
 # -------------------------------------------------------------------
-# Nodo ROS principale
+# Main ROS Node
 # -------------------------------------------------------------------
 class Turtlebot3SquarePath(Node):
     """
-    Un nodo ROS 2 che controlla un TurtleBot3 per eseguire percorsi geometrici di base 
-    utilizzando l'odometria.
+    A ROS 2 node that controls a TurtleBot3 to execute basic geometric paths 
+    using odometry feedback.
 
-    Gestisce l'abbonamento all'odometria e la pubblicazione dei comandi di velocità.
+    Handles the odometry subscription and velocity command publication.
     """
     def __init__(self):
         super().__init__('turtlebot3_square_path_node')
 
-        # QoS per odometria e velocità
+        # QoS for odometry and velocity
         qos = QoSProfile(
             reliability=QoSReliabilityPolicy.RELIABLE,
             history=QoSHistoryPolicy.KEEP_LAST,
@@ -72,28 +72,32 @@ class Turtlebot3SquarePath(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', qos)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, qos)
 
-        # Parametri
+        # Parameters
         self.rate_hz = 20.0
 
-        # Variabili di stato per odometria
+        # State variables for odometry
         self.x = None
         self.y = None
         self.yaw = None
 
-        # Flag di controllo
+        # Control flags
         self.is_running = True
+
+        # Measurements for the grapevine rows
+        self.straight_length = 3.825
+        self.side_length = 1.050
 
         self.get_logger().info('Node initialized.')
 
     # -------------------------------------------------------------------
-    # Callbacks e metodi di supporto
+    # Callbacks and Support Methods
     # -------------------------------------------------------------------
     def odom_callback(self, msg: Odometry):
         """
-        Estrazione della posa di odometria (x, y, yaw) dal messaggio Odometry.
+        Extracts the odometry pose (x, y, yaw) from the Odometry message.
 
         Args:
-            msg (Odometry): Messaggio di odometria ROS 2.
+            msg (Odometry): ROS 2 Odometry message.
         """
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
@@ -103,11 +107,11 @@ class Turtlebot3SquarePath(Node):
 
     def publish_twist(self, linear=0.0, angular=0.0):
         """
-        Pubblica un comando di velocità lineare e angolare sul topic /cmd_vel.
+        Publishes linear and angular velocity commands to the /cmd_vel topic.
 
         Args:
-            linear (float): Velocità lineare in X (m/s).
-            angular (float): Velocità angolare in Z (rad/s).
+            linear (float): Linear velocity in X (m/s).
+            angular (float): Angular velocity in Z (rad/s).
         """
         t = Twist()
         t.linear.x = float(linear)
@@ -115,18 +119,18 @@ class Turtlebot3SquarePath(Node):
         self.cmd_pub.publish(t)
 
     def publish_stop(self):
-        """Pubblica un comando di velocità nullo (arresto del robot)."""
+        """Publishes a zero velocity command (stops the robot)."""
         self.publish_twist(0.0, 0.0)
 
     def wait_for_odom(self, timeout=5.0):
         """
-        Attende fino a quando non vengono ricevute le prime coordinate di odometria (x, y, yaw).
+        Waits until the first odometry coordinates (x, y, yaw) are received.
 
         Args:
-            timeout (float): Tempo massimo di attesa in secondi.
+            timeout (float): Maximum wait time in seconds.
 
         Returns:
-            bool: True se l'odometria è stata ricevuta, False altrimenti.
+            bool: True if odometry was received, False otherwise.
         """
         start = time.time()
         while rclpy.ok() and (self.x is None or self.yaw is None):
@@ -136,17 +140,17 @@ class Turtlebot3SquarePath(Node):
         return True
 
     # -------------------------------------------------------------------
-    # Primitive di movimento
+    # Movement Primitives
     # -------------------------------------------------------------------
     def move_distance(self, distance, linear_vel):
         """
-        Avanza o retrocede per una data distanza utilizzando l'odometria per il feedback.
+        Moves forward or backward for a given distance using odometry for feedback.
 
-        Il movimento si interrompe quando la distanza target è stata coperta.
+        Movement stops when the target distance has been covered.
 
         Args:
-            distance (float): Distanza da percorrere (m). Positivo per avanti, negativo per indietro.
-            linear_vel (float): Velocità lineare massima (m/s).
+            distance (float): Distance to travel (m). Positive for forward, negative for backward.
+            linear_vel (float): Maximum linear velocity (m/s).
         """
         if not self.wait_for_odom():
             self.get_logger().warn('No odom — aborting move_distance().')
@@ -168,7 +172,7 @@ class Turtlebot3SquarePath(Node):
                 break
 
             remaining = max(target - traveled, 0.0)
-            # Controllo proporzionale per decelerare alla fine
+            # Proportional control to decelerate at the end
             speed = min(linear_vel, remaining * 1.0 + 0.05)
 
             self.publish_twist(linear=direction * speed)
@@ -179,14 +183,13 @@ class Turtlebot3SquarePath(Node):
 
     def rotate_angle(self, angle_rad, angular_vel):
         """
-        Ruota di un angolo specificato (rad) utilizzando il feedback di imbardata (yaw)
-        dell'odometria.
+        Rotates by a specified angle (rad) using yaw feedback from odometry.
 
-        La rotazione si interrompe quando l'angolo target è raggiunto.
+        Rotation stops when the target angle is reached.
 
         Args:
-            angle_rad (float): Angolo di rotazione in radianti. Positivo per CCW.
-            angular_vel (float): Velocità angolare massima (rad/s).
+            angle_rad (float): Rotation angle in radians. Positive for CCW.
+            angular_vel (float): Maximum angular velocity (rad/s).
         """
         if not self.wait_for_odom():
             self.get_logger().warn('No odom — aborting rotate_angle().')
@@ -205,10 +208,10 @@ class Turtlebot3SquarePath(Node):
                 continue
 
             error = normalize_angle(target_yaw - self.yaw)
-            if abs(error) < math.radians(1.5): # Tollernaza di 1.5 gradi
+            if abs(error) < math.radians(1.5): # 1.5 degree tolerance
                 break
 
-            k = 1.2 # Guadagno Proporzionale (P)
+            k = 1.2 # Proportional Gain (P)
             angular_speed = min(angular_vel, max(0.05, abs(k * error)))
 
             self.publish_twist(angular=direction * angular_speed)
@@ -218,19 +221,19 @@ class Turtlebot3SquarePath(Node):
         time.sleep(0.05)
 
     # -------------------------------------------------------------------
-    # High-level trajectories
+    # High-level Trajectories
     # -------------------------------------------------------------------
     def run_square_path(self, side_length, duration, per_rot_duration=0.3):
         """
-        Esegue un percorso quadrato con 4 lati.
+        Executes a square path with 4 sides.
 
-        La velocità lineare e angolare sono calcolate in base alla durata totale.
+        Linear and angular velocities are calculated based on the total duration.
 
         Args:
-            side_length (float): Lunghezza di un lato del quadrato (m).
-            duration (float): Durata totale desiderata del percorso (s).
-            per_rot_duration (float): Frazione della durata totale dedicata alla rotazione
-                                      (e.g., 0.3 significa 30% del tempo totale).
+            side_length (float): Length of one side of the square (m).
+            duration (float): Total desired duration of the path (s).
+            per_rot_duration (float): Fraction of total duration dedicated to rotation
+                                      (e.g., 0.3 means 30% of total time).
         """
         if not self.wait_for_odom(timeout=10.0):
             self.get_logger().error('No odom received — cannot start square.')
@@ -239,16 +242,16 @@ class Turtlebot3SquarePath(Node):
         self.get_logger().info('Starting square path.')
 
         n_sides = 4
-        angle = math.pi / 2 # 90 gradi
+        angle = math.pi / 2 # 90 degrees
 
-        # Allocazione del tempo
+        # Time allocation
         total_rot_time = per_rot_duration * duration
         total_straight_time = duration - total_rot_time
 
         rot_time = total_rot_time / n_sides
         straight_time = total_straight_time / n_sides
 
-        # Calcolo delle velocità
+        # Velocity calculations
         linear_vel = side_length / straight_time
         angular_vel = angle / rot_time
 
@@ -265,100 +268,86 @@ class Turtlebot3SquarePath(Node):
         self.publish_stop()
         self.get_logger().info('Completed square path.')
 
-    def follow_polygon(self, n_edges, side_length, duration, per_rot_duration=0.3):
-        """
-        Esegue un percorso poligonale di n lati.
 
-        La velocità lineare e angolare sono calcolate in base alla durata totale.
+    def run_grapevines_row(self, straight_length, side_length, linear_vel=0.4, angular_vel=0.4):
+        """
+        Navigates a serpentine path through grapevine rows using odometry.
+
+        The robot follows a 'U-turn' pattern to cover parallel rows. It moves down a row, 
+        transitions to the next via a 90-degree side maneuver, and repeats the process. 
+        By the end of the two iterations, the robot will have covered four rows and 
+        returned to its initial heading.
 
         Args:
-            n_edges (int): Numero di lati del poligono.
-            side_length (float): Lunghezza di un lato del poligono (m).
-            duration (float): Durata totale desiderata del percorso (s).
-            per_rot_duration (float): Frazione della durata totale dedicata alla rotazione.
+            straight_length (float): The length of each grapevine row in meters.
+            side_length (float): The distance between two parallel rows in meters.
+            linear_vel (float): Forward velocity in m/s. Defaults to 0.4.
+            angular_vel (float): Rotational velocity in rad/s. Defaults to 0.4.
+
+        Returns:
+            None
         """
         if not self.wait_for_odom(timeout=10.0):
-            self.get_logger().error('No odom — cannot start polygon.')
+            self.get_logger().error('No odom received — cannot start row navigation.')
             return
 
-        self.get_logger().info(f'Starting polygon with {n_edges} edges.')
+        self.get_logger().info('Starting to follow grapevine rows...')
 
-        # Allocazione del tempo
-        total_rot_time = per_rot_duration * duration
-        total_straight_time = duration - total_rot_time
+        angle = math.pi / 2  # 90 degrees
 
-        rot_time = total_rot_time / n_edges
-        straight_time = total_straight_time / n_edges
-
-        external_angle = 2.0 * math.pi / n_edges
-
-        # Calcolo delle velocità
-        linear_vel = side_length / straight_time
-        angular_vel = external_angle / rot_time
-
-        for i in range(n_edges):
+        for i in range(2):
             if not rclpy.ok() or not self.is_running:
                 break
+            
+            # --- Navigate First Pair of Rows (Right-Hand Turns) ---
+            # Follow the current row
+            self.move_distance(straight_length, linear_vel)
 
+            # Turn 90 deg right to move toward the next row
+            self.rotate_angle(-angle, angular_vel)
+
+            # Move across to the parallel row
             self.move_distance(side_length, linear_vel)
-            self.rotate_angle(external_angle, angular_vel)
+
+            # Turn 90 deg right to align with the new row (facing opposite direction)
+            self.rotate_angle(-angle, angular_vel)
+
+            # --- Navigate Second Pair of Rows (Left-Hand Turns) ---
+            # Follow the second row
+            self.move_distance(straight_length, linear_vel)
+
+            # Turn 90 deg left to move toward the next row
+            self.rotate_angle(angle, angular_vel)
+
+            # Move across to the parallel row
+            self.move_distance(side_length, linear_vel)
+
+            # Turn 90 deg left to align with the next row (facing original direction)
+            self.rotate_angle(angle, angular_vel)
 
         self.publish_stop()
-        self.get_logger().info('Completed polygon path.')
-
-    def follow_circle(self, radius, duration):
-        """
-        Esegue un percorso circolare a velocità costante (velocità lineare/angolare)
-        per una data durata.
-
-        Args:
-            radius (float): Raggio del cerchio (m).
-            duration (float): Durata totale del percorso (s).
-        """
-        if not self.wait_for_odom(timeout=10.0):
-            self.get_logger().error('No odom — cannot start circle.')
-            return
-
-        self.get_logger().info(f'Starting circular path: radius={radius} m, duration={duration}s')
-
-        # Calcola le velocità per completare un giro in 'duration' secondi.
-        linear_vel = 2.0 * math.pi * radius / duration
-        angular_vel = 2.0 * math.pi / duration
-
-        rate_dt = 1.0 / self.rate_hz
-        steps = int(duration * self.rate_hz)
-
-        while True:
-            if not rclpy.ok() or not self.is_running:
-                break
-
-            self.publish_twist(linear=linear_vel, angular=angular_vel)
-            time.sleep(rate_dt)
-
-        self.publish_stop()
-        self.get_logger().info('Completed circular path.')
-
+        self.get_logger().info('Completed grapevine row navigation.')
 
 # -------------------------------------------------------------------
-# Main entry
+# Main Entry Point
 # -------------------------------------------------------------------
 def main(args=None):
     """
-    Funzione principale per l'esecuzione del nodo.
-    Inizializza ROS 2, crea il nodo, esegue lo spin in un thread
-    separato ed esegue la traiettoria desiderata.
+    Main function to run the node.
+    Initializes ROS 2, creates the node, spins it in a separate thread,
+    and executes the desired trajectory.
     """
     rclpy.init(args=args)
     node = Turtlebot3SquarePath()
 
-    # spin in background so odom updates
+    # Spin in background so odom updates continuously
     spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
     spin_thread.start()
 
     try:
+        # Example calls:
         # node.run_square_path(side_length=1.0, duration=12.0)
-        # node.follow_polygon(n_edges=6, side_length=0.4, duration=10.0)
-        node.follow_circle(0.6, 5.0)
+        node.run_grapevines_row(node.straight_length, node.side_length)
     except KeyboardInterrupt:
         pass
     finally:
