@@ -97,6 +97,11 @@ class ObstacleAvoidance(Node):
         self.checkpoint4_x = -1.825
         self.checkpoint4_y = -2.000
 
+        # Safety measure to ensure the robot does not drift
+        # If self.safety_alignment is True, then the robot will periodically realign to the next intersection, avoiding
+        # drifting which causes unpredictable and problematic behavior
+        self.safety_alignment = True
+
         # -----------------------------
         # ROS I/O
         # -----------------------------
@@ -434,7 +439,8 @@ class ObstacleAvoidance(Node):
             
             else:
                 # Align to next checkpoint (safety constraint/path following)
-                self.align_to_next_checkpoint()
+                if self.safety_alignment:
+                    self.align_to_next_checkpoint()
 
                 return
             
